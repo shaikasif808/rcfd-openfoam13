@@ -1,0 +1,64 @@
+#!/bin/sh
+# aeratedStirredTankMRF tutorial of OpenFOAM-13 (multiphaseEuler, gas and liquid, MRF) with rCFD:
+# a species in the gas, fed at the sparger.
+#   1. meshing as in the tutorial (snappyHexMesh in parallel, then reconstructPar)
+#   2. rcfd_compile          builds rCFD/rCFD_user_prep.h and rCFD/rCFD_user_run.h
+#   3. foamRun               CFD to 15 s; rCFDPrep records 40 frames in the last second
+#   4. rCFD/rcfd_run         rCFD run mode on the database: 2000 steps = 50 s
+#   5. snap_to_foam.py       results for ParaView in ./rCFD_results
+#
+# The CFD run is the long part (the tutorial itself). To try the chain first:
+#   ./Allrun test       records 8 frames right at the start (0.05 s to 0.25 s, gas fed from
+#                       0.05 s) and runs 7 rCFD steps. The flow is the start-up, not a result.
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+
+if [ ! -d system ]; then
+    src="$FOAM_TUTORIALS/multiphaseEuler/aeratedStirredTankMRF"
+    cp -r "$src/0" "$src/constant" "$src/system" .
+    cat rCFDPrep.functions >> system/functions
+
+    if [ "$1" = test ]; then
+        sed -i "s/^endTime .*/endTime         0.2501;/; s/^writeInterval .*/writeInterval   0.25;/" system/controlDict
+        sed -i "s/recordStart     14.0;.*/recordStart     0.05;/" system/functions
+        sed -i "s/start       5;/start       0.05;/; s/duration    0.1;/duration    0.02;/" 0/U.gas
+        sed -i 's/"number_of_frames", 40/"number_of_frames", 8/' rCFD/rCFD_user_prep.h
+        sed -i 's/#define _number_of_frames   40/#define _number_of_frames   8/' rCFD/rCFD_user_run.h
+    fi
+fi
+
+# mesh, as in the Allrun of the tutorial
+runApplication snappyHexMeshConfig \
+    -cylindricalBackground \
+    -rotatingZones 'rotatingZone' \
+    -surfaceLevels "(sparger 3) (stirrer 3)" \
+    -baffles "baffles"
+
+runApplication blockMesh
+runApplication decomposePar -copyZero
+runParallel snappyHexMesh
+
+runParallel setFields
+
+# needed before foamRun: reconstructs the mesh made in parallel and writes the cell
+# addressing of the processors, which numbers the cells of the database
+runApplication reconstructPar -withZero -fields '(alpha.gas alpha.liquid)'
+
+rcfd_compile || exit 1
+
+runParallel foamRun
+
+np="$(getNumberOfProcessors)"
+
+if [ "$1" = test ]; then
+    mpirun -np "$np" rCFD/rcfd_run -steps 7 -snap 1 > log.rcfd_run 2>&1
+else
+    mpirun -np "$np" rCFD/rcfd_run -steps 2000 -snap 20 > log.rcfd_run 2>&1
+fi
+
+# --copy-mesh: a copy of the mesh instead of a link, so that ParaView on Windows can open it
+python3 ../../py/snap_to_foam.py --run . --case . --out rCFD_results --copy-mesh > log.snap_to_foam 2>&1
+
+grep "database complete" log.foamRun
+grep "run finished" log.rcfd_run
+tail -1 rCFD_gas_tracer_monitor.out

@@ -1,0 +1,7 @@
+Ux		 0;
+Uy		 2.135;
+Uz		 0;
+// nozzle air: 18.6 m/s through four orifices of 10 mm = 5.843e-3 m3/s.
+// The mesh represents the orifices with 2.827e-4 m2 instead of 3.142e-4 m2:
+// velocity scaled so that the flow rate is kept (18.6 * 3.142/2.827)
+U_nozzle	20.67;

@@ -1,0 +1,75 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  dev
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSchemes;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+ddtSchemes
+{
+    default     Euler;
+}
+
+gradSchemes
+{
+    default     Gauss linear;
+    limited     cellLimited Gauss linear 1;
+    grad(U)     $limited;
+}
+
+divSchemes
+{
+    default                         none;
+
+    div(phi,alpha)            Gauss vanLeer;
+    div(phir,alpha)           Gauss vanLeer;
+
+    div(alphaRhoPhi,U)      Gauss limitedLinearV 1;
+    div(phi,U)              Gauss limitedLinearV 1;
+
+    "div\(alphaRhoPhi,(h|e)\)"  Gauss limitedLinear 1;
+    div(alphaRhoPhi,K)      Gauss limitedLinear 1;
+    div(alphaRhoPhi,(p|rho)) Gauss limitedLinear 1;
+
+    div(alphaRhoPhi.particles,Theta.particles) Gauss limitedLinear 1;
+
+    "div\(alphaRhoPhi,(k|epsilon)\)"  Gauss limitedLinear 1;
+
+    div((((alpha.air*rho.air)*nuEff.air)*dev2(T(grad(U.air))))) Gauss linear;
+
+    divDevTau(U.particles)          Gauss linear;
+}
+
+laplacianSchemes
+{
+    default     Gauss linear limited corrected 0.5;
+    bounded     Gauss linear uncorrected;
+}
+
+interpolationSchemes
+{
+    default     linear;
+}
+
+snGradSchemes
+{
+    default     limited corrected 0.5;
+    bounded     uncorrected;
+}
+
+wallDist
+{
+    method      meshWave;
+}
+
+
+// ************************************************************************* //

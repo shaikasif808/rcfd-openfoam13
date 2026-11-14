@@ -1,0 +1,15 @@
+
+// rCFD preparation mode during the run (counterpart of rcfd_prep.scm).
+// Frame interval, number of frames and all rCFD settings: rCFD/rCFD_user_prep.h
+rCFDPrep1
+{
+    type            rCFDPrep;
+    libs            ("librCFDFunctionObjects.so");
+
+    phases          (gas liquid);       // order = phase index in the user headers
+    recordStart     14.0;               // s: 40 frames of 0.025 s end at 15 s
+
+    // The solver runs at Courant numbers up to 40 (rotating zone, sparger). The position
+    // labels are advanced in sub-steps so that their Courant number stays below this value.
+    labelMaxCo      0.5;
+}

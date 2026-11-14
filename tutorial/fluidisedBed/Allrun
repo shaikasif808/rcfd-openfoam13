@@ -1,0 +1,40 @@
+#!/bin/sh
+# fluidisedBed tutorial of OpenFOAM-13 with rCFD:
+#   1. rcfd_compile          builds rCFD/rCFD_user_prep.h and rCFD/rCFD_user_run.h
+#   2. foamRun               CFD; the function object rCFDPrep writes the database to ./data
+#   3. rCFD/rcfd_run         rCFD run mode on the database
+#   4. snap_to_foam.py       results for ParaView in ./rCFD_results
+#
+#   ./Allrun            4 processors (decomposeParDict of the tutorial)
+#   ./Allrun serial
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+
+if [ ! -d system ]; then
+    src="$FOAM_TUTORIALS/multiphaseEuler/fluidisedBed"
+    cp -r "$src/0" "$src/constant" "$src/system" .
+    # 2 s spin-up + 80 frames of 0.025 s; few time directories (rCFD does not need them)
+    sed -i '/^rCFDPrep1/,/^}/d' system/controlDict
+    sed -i "s/^endTime .*/endTime         4;/; s/^writeInterval .*/writeInterval   0.5;/" system/controlDict
+    cat rCFDPrep.functions >> system/functions
+fi
+
+rcfd_compile || exit 1
+
+runApplication blockMesh
+runApplication setFields
+
+if [ "$1" = serial ]; then
+    runApplication foamRun
+    rCFD/rcfd_run -steps 800 -snap 10 > log.rcfd_run 2>&1
+else
+    runApplication decomposePar
+    runParallel foamRun
+    mpirun -np "$(getNumberOfProcessors)" rCFD/rcfd_run -steps 800 -snap 10 > log.rcfd_run 2>&1
+fi
+
+python3 ../../py/snap_to_foam.py --run . --case . --out rCFD_results > log.snap_to_foam 2>&1
+
+grep "database written" log.foamRun
+grep "run finished" log.rcfd_run
+tail -1 rCFD_mean_height_monitor.out

@@ -1,0 +1,3 @@
+rCFDPrep.C
+
+LIB = $(FOAM_USER_LIBBIN)/librCFDFunctionObjects

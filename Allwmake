@@ -1,0 +1,51 @@
+#!/bin/sh
+# rCFD inside OpenFOAM-13: builds
+#   $FOAM_USER_LIBBIN/librcfdOF.so                 rCFD library + coupling (C, MPI)
+#   $FOAM_USER_LIBBIN/librCFDFunctionObjects.so    function object rCFDPrep
+#   $FOAM_USER_APPBIN/rcfd_compile                 builds the user headers of a case
+#
+#   ./Allwmake                 (OpenFOAM-13 environment sourced, mpicc of the same MPI in PATH)
+#   RCFD_CC=mpiicc ./Allwmake  (other MPI C compiler wrapper)
+cd "${0%/*}" || exit 1
+
+[ -n "$WM_PROJECT_DIR" ] && [ -n "$FOAM_USER_LIBBIN" ] || {
+    echo "Allwmake: source the OpenFOAM-13 environment first"; exit 1; }
+
+# OpenFOAM-13 or -dev; older versions (6 ... 12) have another interface
+case "$WM_PROJECT_VERSION" in
+    13*|14*|dev*) ;;
+    *) echo "Allwmake: this is OpenFOAM '$WM_PROJECT_VERSION' ($WM_PROJECT_DIR). Source OpenFOAM-13 first."; exit 1;;
+esac
+
+CC=${RCFD_CC:-mpicc}
+OPT=${RCFD_OPT:--O2}
+DEFS="-DRCFD_STANDALONE -DRCFD_LIB_MPI"
+OBJ=build
+
+command -v "$CC" > /dev/null || { echo "Allwmake: '$CC' not found (set RCFD_CC)"; exit 1; }
+
+set -e
+mkdir -p "$OBJ" "$FOAM_USER_LIBBIN" "$FOAM_USER_APPBIN"
+
+echo "--- rCFD library and coupling ($CC $OPT)"
+$CC $OPT -w    -fPIC $DEFS -Ilib -c lib/rCFD_library.c   -o $OBJ/rCFD_library.o
+$CC $OPT -w    -fPIC $DEFS -Ilib -c lib/tomlc17.c        -o $OBJ/tomlc17.o
+$CC $OPT -Wall -fPIC $DEFS -Ilib -c src/rcfd_of_bridge.c -o $OBJ/rcfd_of_bridge.o
+
+# only the library interface (rcfd_...) is visible from outside
+printf '{ global: rcfd_*; local: *; };\n' > $OBJ/export.map
+$CC -shared -Wl,--version-script=$OBJ/export.map -o "$FOAM_USER_LIBBIN/librcfdOF.so" \
+    $OBJ/rcfd_of_bridge.o $OBJ/rCFD_library.o $OBJ/tomlc17.o -lm -ldl
+
+echo "--- run program (linked with the user header of a case by rcfd_compile)"
+$CC $OPT -Wall $DEFS -Ilib -Isrc -c src/rcfd_run_main.c -o $OBJ/rcfd_run_main.o
+
+echo "--- rcfd_compile"
+sed "s|@RCFD_FOAM_HOME@|$(pwd -P)|" bin/rcfd_compile > "$FOAM_USER_APPBIN/rcfd_compile"
+chmod +x "$FOAM_USER_APPBIN/rcfd_compile"
+
+echo "--- function object rCFDPrep"
+wmake libso functionObject
+
+echo "--- done"
+ls -l "$FOAM_USER_LIBBIN/librcfdOF.so" "$FOAM_USER_LIBBIN/librCFDFunctionObjects.so" "$FOAM_USER_APPBIN/rcfd_compile"

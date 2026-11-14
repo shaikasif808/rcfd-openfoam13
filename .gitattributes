@@ -1,0 +1,3 @@
+# line feeds everywhere: the files are used on Linux clusters, also when cloned on Windows
+* text=auto eol=lf
+*.png binary

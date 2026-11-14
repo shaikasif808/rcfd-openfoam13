@@ -1,0 +1,11 @@
+
+// rCFD preparation mode during the run (counterpart of rcfd_prep.scm).
+// Frame interval, number of frames and all rCFD settings: rCFD/rCFD_user_prep.h
+rCFDPrep1
+{
+    type            rCFDPrep;
+    libs            ("librCFDFunctionObjects.so");
+
+    phases          (air particles);    // order = phase index in the user headers
+    recordStart     2.0;                // s, end of the spin-up
+}

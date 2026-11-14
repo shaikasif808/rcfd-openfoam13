@@ -1,0 +1,37 @@
+# build products of the package
+build/
+functionObject/Make/linux*/
+functionObject/lnInclude/
+tutorial/*/dragModel/Make/linux*/
+tutorial/*/dragModel/lnInclude/
+py/__pycache__/
+*.o
+*.so
+*.dep
+
+# compiled user headers
+tutorial/*/rCFD/rcfd_run
+tutorial/*/rCFD/librCFD_user_prep.so
+
+# OpenFOAM and rCFD results of a case
+processor*/
+postProcessing/
+data/
+out/
+rCFD_results/
+dynamicCode/
+log.*
+*.out
+constant/polyMesh/
+tutorial/*/constant/polyMesh/
+tutorial/*/constant/extendedFeatureEdgeMesh/
+tutorial/*/[1-9]*/
+tutorial/*/0.[0-9]*/
+
+# cases that Allrun copies from $FOAM_TUTORIALS
+tutorial/fluidisedBed/0/
+tutorial/fluidisedBed/constant/
+tutorial/fluidisedBed/system/
+tutorial/aeratedStirredTank/0/
+tutorial/aeratedStirredTank/constant/
+tutorial/aeratedStirredTank/system/

@@ -1,0 +1,71 @@
+#!/bin/sh
+# rcfd_compile - builds the rCFD user headers of an OpenFOAM case (run it in the case directory)
+#
+#   rcfd_compile              both headers found in ./rCFD
+#   rcfd_compile prep         rCFD/rCFD_user_prep.h -> rCFD/librCFD_user_prep.so  (loaded by foamRun, entry rCFDPrep1)
+#   rcfd_compile run          rCFD/rCFD_user_run.h  -> rCFD/rcfd_run              (mpirun -np N rCFD/rcfd_run -steps 800)
+#   rcfd_compile -templates   copies the two example headers into ./rCFD if they are not there
+#
+# Counterpart of building the UDF library in Fluent: run it again after every change of a header.
+RCFD_FOAM_HOME="@RCFD_FOAM_HOME@"
+
+CC=${RCFD_CC:-mpicc}
+OPT=${RCFD_OPT:--O2}
+DEFS="-DRCFD_STANDALONE -DRCFD_LIB_MPI"
+INC="-I$RCFD_FOAM_HOME/user -I$RCFD_FOAM_HOME/lib -I$RCFD_FOAM_HOME/src -IrCFD"
+WRAP="$RCFD_FOAM_HOME/user/rcfd_user_wrap.c"
+OBJ="$RCFD_FOAM_HOME/build"
+
+[ -n "$FOAM_USER_LIBBIN" ] || { echo "rcfd_compile: source the OpenFOAM environment first"; exit 1; }
+[ -f "$OBJ/rcfd_run_main.o" ] && [ -f "$FOAM_USER_LIBBIN/librcfdOF.so" ] || {
+    echo "rcfd_compile: run ./Allwmake in $RCFD_FOAM_HOME first"; exit 1; }
+
+# cksum and size of the header, stored in the build: foamRun and rcfd_run stop if the header
+# is changed afterwards without compiling again
+header_id() { set -- $(cksum < "$1"); echo "-DRCFD_USER_HEADER_CRC=${1}UL -DRCFD_USER_HEADER_BYTES=${2}L"; }
+
+what=${1:-all}
+
+if [ "$what" = "-templates" ]; then
+    mkdir -p rCFD || exit 1
+    for f in rCFD_user_prep.h rCFD_user_run.h; do
+        if [ -e "rCFD/$f" ]; then echo "rCFD/$f exists, left as it is"
+        else cp "$RCFD_FOAM_HOME/user/templates/$f" "rCFD/$f" && echo "rCFD/$f copied from the templates"; fi
+    done
+    exit 0
+fi
+
+case "$what" in prep|run|all) ;; *) sed -n '2,9p' "$0"; exit 1;; esac
+
+[ -d system ] || echo "rcfd_compile: note: no system folder here; this should be the OpenFOAM case directory"
+
+done_any=0
+
+if [ "$what" = prep ] || [ "$what" = all ]; then
+    if [ -f rCFD/rCFD_user_prep.h ]; then
+        echo "--- rCFD/rCFD_user_prep.h -> rCFD/librCFD_user_prep.so"
+        $CC $OPT -Wall -fPIC -shared $DEFS -DRCFD_USER_PREP -DRCFD_USER_HEADER='"rCFD_user_prep.h"' $(header_id rCFD/rCFD_user_prep.h) $INC \
+            "$WRAP" -L"$FOAM_USER_LIBBIN" -lrcfdOF -Wl,-rpath,"$FOAM_USER_LIBBIN" \
+            -o rCFD/librCFD_user_prep.so || { echo "rcfd_compile: rCFD_user_prep.h did not compile"; exit 1; }
+        done_any=1
+    elif [ "$what" = prep ]; then
+        echo "rcfd_compile: no rCFD/rCFD_user_prep.h (rcfd_compile -templates copies an example)"; exit 1
+    fi
+fi
+
+if [ "$what" = run ] || [ "$what" = all ]; then
+    if [ -f rCFD/rCFD_user_run.h ]; then
+        echo "--- rCFD/rCFD_user_run.h -> rCFD/rcfd_run"
+        $CC $OPT -Wall $DEFS -DRCFD_USER_RUN -DRCFD_USER_HEADER='"rCFD_user_run.h"' $(header_id rCFD/rCFD_user_run.h) $INC \
+            "$WRAP" "$OBJ/rcfd_run_main.o" "$OBJ/rCFD_library.o" "$OBJ/tomlc17.o" -lm \
+            -o rCFD/rcfd_run || { echo "rcfd_compile: rCFD_user_run.h did not compile"; exit 1; }
+        done_any=1
+    elif [ "$what" = run ]; then
+        echo "rcfd_compile: no rCFD/rCFD_user_run.h (rcfd_compile -templates copies an example)"; exit 1
+    fi
+fi
+
+[ $done_any = 1 ] || { echo "rcfd_compile: no rCFD/rCFD_user_prep.h or rCFD/rCFD_user_run.h here (rcfd_compile -templates copies examples)"; exit 1; }
+
+for f in rCFD/librCFD_user_prep.so rCFD/rcfd_run; do [ -f "$f" ] && ls -l "$f"; done
+exit 0

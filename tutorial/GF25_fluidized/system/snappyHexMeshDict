@@ -1,0 +1,125 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  13
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      snappyHexMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// GF25 trough. Cell sizes (background 20 mm):
+//   freeboard above y = 0.43     20 mm, 10 mm at the casing
+//   bed, y = 0.04 to 0.43        10 mm  (5.6 particle diameters)
+//   nozzles and spray cones       5 mm
+// No fine layer at the distributor: the inlet is a plain boundary in this case.
+
+castellatedMesh true;
+snap            true;
+addLayers       false;
+
+geometry
+{
+    inlet        { type triSurfaceMesh; file "inlet.stl"; }
+    outlet       { type triSurfaceMesh; file "outlet.stl"; }
+    casing       { type triSurfaceMesh; file "casing.stl"; }
+    nozzle_inlet { type triSurfaceMesh; file "nozzle_inlet.stl"; }
+    nozzle_wall  { type triSurfaceMesh; file "nozzle_wall.stl"; }
+    nozzle_cone  { type triSurfaceMesh; file "nozzle_cone.stl"; }
+
+    bed
+    {
+        type searchableBox;
+        min (-0.430 -0.010 -0.010);
+        max ( 0.430  0.430  1.010);
+    }
+};
+
+castellatedMeshControls
+{
+    maxLocalCells       1000000;
+    maxGlobalCells      2000000;
+    minRefinementCells  10;
+    maxLoadUnbalance    0.10;
+    nCellsBetweenLevels 2;
+
+    features
+    (
+        { file "casing.eMesh";       level 1; }
+        { file "inlet.eMesh";        level 1; }
+        { file "outlet.eMesh";       level 0; }
+        { file "nozzle_inlet.eMesh"; level 2; }
+        { file "nozzle_wall.eMesh";  level 2; }
+    );
+
+    refinementSurfaces
+    {
+        casing       { level (1 1); patchInfo { type wall; } }
+        outlet       { level (0 0); patchInfo { type patch; } }
+        inlet        { level (1 1); patchInfo { type patch; } }
+        nozzle_inlet { level (2 2); patchInfo { type patch; } }
+        nozzle_wall  { level (2 2); patchInfo { type wall; } }
+    }
+
+    resolveFeatureAngle 30;
+
+    refinementRegions
+    {
+        bed         { mode inside; level 1; }
+        nozzle_cone { mode inside; level 2; }
+    }
+
+    insidePoint (0.010101 0.212121 0.02121212);
+    allowFreeStandingZoneFaces true;
+}
+
+snapControls
+{
+    nSmoothPatch    3;
+    tolerance       2.0;
+    nSolveIter      30;
+    nRelaxIter      5;
+    nFeatureSnapIter 10;
+    implicitFeatureSnap  false;
+    explicitFeatureSnap  true;
+    multiRegionFeatureSnap false;
+}
+
+addLayersControls
+{
+    relativeSizes       true;
+    layers              {}
+    expansionRatio      1.0;
+    finalLayerThickness 0.3;
+    minThickness        0.1;
+    nGrow               0;
+    featureAngle        60;
+    slipFeatureAngle    30;
+    nRelaxIter          3;
+    nSmoothSurfaceNormals 1;
+    nSmoothNormals      3;
+    nSmoothThickness    10;
+    maxFaceThicknessRatio 0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedianAxisAngle  90;
+    nBufferCellsNoExtrude 0;
+    nLayerIter          50;
+}
+
+meshQualityControls
+{
+    #include "meshQualityDict"
+
+    nSmoothScale    4;
+    errorReduction  0.75;
+}
+
+mergeTolerance 1e-6;
+
+// ************************************************************************* //
