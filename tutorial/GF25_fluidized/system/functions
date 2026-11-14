@@ -30,7 +30,7 @@ rCFDPrep1
     libs            ("librCFDFunctionObjects.so");
 
     phases          (air particles);    // order = phase index in the user headers
-    recordStart     5;                  // s, after the start-up
+    recordStart     10;                  // s, after the start-up
 }
 
 // ************************************************************************* //

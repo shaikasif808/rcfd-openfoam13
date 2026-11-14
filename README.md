@@ -242,11 +242,11 @@ model, user headers, job script), not a copy of an OpenFOAM tutorial. Steps and 
 that are still assumed are in `tutorial/GF25_fluidized/README.txt`.
 
 * 15 kg of 1.8 mm particles (1040 kg/m3), 2.135 m/s fluidisation air, four nozzles.
-* Mesh by `blockMesh` and `snappyHexMesh` from `constant/triSurface`: 177 333 cells.
+* Mesh by `blockMesh` and `snappyHexMesh` from `constant/geometry`: 177 333 cells.
 * Drag `BeetstraLimited` (`dragModel/`, built with `wmake libso`): the Beetstra model of
   OpenFOAM-13 with a lower limit on the Reynolds number, because the original divides by
   zero where both phases have the same velocity.
-* 2000 frames of 5 ms from 5 s. `run_gf25.sbatch` runs all steps on 32 processes; the
+* 2000 frames of 5 ms from 10 s, end at 20 s. `run_gf25.sbatch` runs all steps on 32 processes; the
   folder in its `--chdir` line is that of the TUHH cluster.
 * Tested for the first 20 ms on 4 processes (meshing, start-up, frames, `rcfd_run`). The
   fluidised state has not been simulated yet.

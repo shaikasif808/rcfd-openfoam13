@@ -48,7 +48,8 @@ fi
 
 # --- 2. mesh -------------------------------------------------------------------
 if [ ! -f constant/polyMesh/owner ]; then
-    [ -f constant/triSurface/casing.stl ] || stop "constant/triSurface is missing"
+    [ -f constant/geometry/casing.stl ] || [ -f constant/triSurface/casing.stl ] \
+        || stop "geometry is missing (constant/geometry)"
     blockMesh      > log.blockMesh 2>&1      || stop "blockMesh failed"
     snappyHexMesh  > log.snappyHexMesh 2>&1  || stop "snappyHexMesh failed"
 fi

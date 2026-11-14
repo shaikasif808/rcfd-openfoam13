@@ -24,7 +24,7 @@ startTime       0;
 
 stopAt          endTime;
 
-endTime         15.001;     // 5 s start-up + 2000 frames of 5 ms (database complete at 15 s)
+endTime         20.001;     // 5 s start-up + 2000 frames of 5 ms (database complete at 15 s)
 
 deltaT          1e-5;
 

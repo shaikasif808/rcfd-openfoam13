@@ -7,7 +7,7 @@ The fluidised state itself has not been simulated yet.
 
 Mesh (system/blockMeshDict, system/snappyHexMeshDict): 177 333 cells
   bed (y 0.04 to 0.43) 10 mm, nozzles and spray cones 5 mm, freeboard 20 mm (10 mm at the casing)
-  largest non-orthogonality 48 degrees. Geometry: constant/triSurface (six .stl and .eMesh files).
+  largest non-orthogonality 48 degrees. Geometry: constant/geometry (six .stl and .eMesh files).
 
 Taken from the CFD-DEM case:
   bed mass 15 kg                    system/setFieldsDict (alpha 0.5266 in 0.11 m)
@@ -26,7 +26,9 @@ Use (run_gf25.sbatch does steps 2 to 5 and skips those already done):
   4. rcfd_compile
   5. 32 processes: decomposePar; mpirun setFields -parallel; mpirun foamRun -parallel
 
-Recording: 2000 frames of 5 ms from t = 5 s (rCFD/rCFD_user_prep.h, system/functions), endTime 15 s.
+Recording: 2000 frames of 5 ms from t = 10 s (rCFD/rCFD_user_prep.h, system/functions), endTime 20 s.
+Averages (fieldAverage) start at 5 s.
 Database: about 12 MB per frame, 25 GB in total.
 Monitors in postProcessing/: solids volume (x 1040 = kg), pressure at the inlet, largest alpha.particles.
 rCFD/rCFD_user_run.h is the package template (density 1040, 2000 frames, 5 ms): put your own model there.
+run_gf25.sbatch: job script of the TUHH cluster (folder in its --chdir line).
