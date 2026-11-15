@@ -1,0 +1,31 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      createNonConformalCouplesDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// The four side patches (cyclicAMI in the v2512 case) are coupled in pairs.
+// separation = position of the first patch minus position of the second:
+// left is at x = -5 mm, right at x = +5 mm, top at y = +5 mm, bottom at y = -5 mm.
+
+fields  no;         // the fields take the patch types from caseDicts/setConstraintTypes
+
+nonConformalCouples
+{
+    sidesX
+    {
+        patches         (left right);
+        transform       translational;
+        separation      (-0.01 0 0);
+    }
+    sidesY
+    {
+        patches         (top bottom);
+        transform       translational;
+        separation      (0 0.01 0);
+    }
+}
+
+// ************************************************************************* //

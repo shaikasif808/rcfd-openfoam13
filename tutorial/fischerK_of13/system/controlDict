@@ -1,0 +1,36 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solver          incompressibleFluid;
+
+startFrom       latestTime;
+startTime       0;
+stopAt          endTime;
+endTime         3000;           // iterations; the run stops earlier at residualControl (fvSolution)
+deltaT          1;
+
+writeControl    timeStep;
+writeInterval   250;
+purgeWrite      2;              // keeps the last two states: about 1 GB each
+writeFormat     binary;
+writePrecision  8;
+writeCompression off;
+timeFormat      general;
+timePrecision   8;
+runTimeModifiable yes;
+
+functions
+{
+    // pressure drop: mean kinematic pressure at the inlet, every iteration
+    #includeFunc patchAverage(patch=inlet, fields=(p))
+
+    // largest velocity magnitude in the mesh
+    #includeFunc cellMaxMag(fields=(U))
+}
+
+// ************************************************************************* //

@@ -1166,6 +1166,18 @@ Checks of r4 in the test environment:
 
 Not tested in r4: periodic sides with more than one phase, the aerated stirred tank, drift and `local_diff_on` across periodic sides (the library takes the distance of the cell centres, which is wrong across a side). Databases of cases without periodic sides do not change.
 
+### Release r5
+
+| Change | Files | Why |
+| --- | --- | --- |
+| New call for the run header: `rcfd_update_corona_field(handle, array)` fills the copies of the cells of the neighbour processors for an array of the header with one value per cell. | `src/rcfd_run_main.c`, `user/udf.h`, `user/rcfd_user_wrap.c` | An iterative solver written in the header needs its search direction in the neighbour cells. |
+| `latticeReactions`: implicit diffusion step with the wall reaction (`_diffusion_in_header 2`, `diffuse_and_react_implicit`), one conjugate-gradient solve per species and sub-step. The explicit sub-steps stay the default of the tutorial. | `tutorial/latticeReactions/rCFD/rCFD_user_run.h` | The explicit sub-step scales with the square of the smallest cell. The 16 million cell lattice mesh has wall cells of about 1 µm (smallest cell volume 7.8e-17 m3): the explicit sub-step would be below a microsecond. |
+| `latticeReactions`: `residualControl` moved to the `PIMPLE` dictionary, where the solver modules of OpenFOAM-13 read it. | `tutorial/latticeReactions/system.flow/fvSolution` | The steady flow ran all 1500 iterations; it now stops at convergence (251 iterations). |
+| `py/rcfd_monitor.py`: pictures of a running or finished run. | `py/rcfd_monitor.py` | Monitors and the `[c2c]` lines of the log as one picture. |
+| Case `fischerK_of13`: the 16 million cell lattice case in two jobs (mesh conversion and steady flow; recording and rCFD run). | `tutorial/fischerK_of13/` | Job 1 ran on the cluster: 614 iterations in 595 s on 64 processes. |
+
+Implicit step in the small lattice, frames of 20 ms, E at the outlet after 4 s: 0.457, 0.462, 0.466, 0.467 with 1, 2, 4, 8 sub-steps per step; 0.470 with the explicit sub-steps; 0.4765 in the reference. The step is first order in time.
+
 ### What this means for existing work
 
 - With a label Courant number of 1 or less, r3 uses the same code path as r2 and records the same database. Above 1 it now takes sub-steps, so a fluidised-bed database recorded with r3 can differ slightly from one recorded with r2. The log line `label Courant number up to ...` of each frame shows which case applies.

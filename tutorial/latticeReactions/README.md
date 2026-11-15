@@ -22,7 +22,7 @@ written by `makeLatticeMesh.py`; it stands for a body-fitted mesh, the method is
 ## Run
 
 ```
-./Allrun                 # all steps, 4 processors, about 8 min
+./Allrun                 # all steps, 4 processors, about 5 min
 ./Allrun nonConformal    # the same with non-conformal periodic sides
 ./Allrun step 0.005      # afterwards: recording and rCFD run with another frame interval [s]
 ./Allrun reference       # afterwards: OpenFOAM solves the species on the same flow (7 min)
@@ -78,6 +78,25 @@ cell lies close to the cell itself (interpolation between the source cell and it
 neighbours), and that error adds up over more steps.
 
 Cyclic sides and non-conformal sides give the same result (outlet values equal to four digits).
+
+### Meshes with thin cells at the wall
+
+The sub-step of the explicit diffusion scales with the square of the smallest cell: fine here,
+far too small on a mesh with wall layers of a few micrometres. `_diffusion_in_header 2` in
+`rCFD/rCFD_user_run.h` switches to an implicit diffusion step that contains the wall reaction
+(`diffuse_and_react_implicit`): one conjugate-gradient solve per species, `_implicit_substeps`
+times per rCFD step. It is first order in time:
+
+| Frames of 20 ms | A | C | D | E |
+|---|---|---|---|---|
+| explicit sub-steps | 0.0077 | 0.1727 | 0.3469 | 0.4702 |
+| implicit, 1 sub-step | 0.0082 | 0.1753 | 0.3570 | 0.4567 |
+| implicit, 2 sub-steps | 0.0078 | 0.1743 | 0.3529 | 0.4623 |
+| implicit, 4 sub-steps | 0.0075 | 0.1737 | 0.3506 | 0.4656 |
+| implicit, 8 sub-steps | 0.0074 | 0.1733 | 0.3494 | 0.4673 |
+
+On this mesh the implicit step is slower than the explicit one (58 to 120 s against 47 s); it
+pays where the explicit sub-step would be microseconds.
 
 ## A case of your own
 

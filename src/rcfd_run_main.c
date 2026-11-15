@@ -100,6 +100,11 @@ static double *g_face_dist = NULL;
  * corona copies on the other ranks */
 int parallel_map_phase_data(void *rcfd, int i_phase);
 
+/* library (rCFD_parallel.h): fills the corona entries of an array with one value per cell.
+ * The format 0 is RCFD_PARALLEL_MAP_HOST_FORMAT, the first entry of
+ * rcfd_parallel_format_names in lib/rCFD_types.h. */
+void parallel_communicate(void *rcfd, double *cell_data, int i_layer, short comm_format);
+
 /* distance of the cell centres of every face; across a periodic patch the distance through
  * the patch (data/topo/periodic_<rank>), not that of the two positions */
 static void run_set_face_distances(void)
@@ -168,6 +173,19 @@ int rcfd_run_update_corona(void *handle, int i_phase)
     if(of_size < 2) return 0;
 
     return parallel_map_phase_data(handle, i_phase);
+}
+
+/* udf.h: the same for one array of the user header with one value per cell (cells of this
+ * rank, then corona cells): the corona entries are filled from the ranks that hold the cells */
+int rcfd_run_update_corona_field(void *handle, double *field)
+{
+    if(handle == NULL || field == NULL) return -1;
+
+    if(of_size < 2) return 0;
+
+    parallel_communicate(handle, field, rcfd_get_current_layer(handle), 0);
+
+    return 0;
 }
 
 /* udf.h: faces of a boundary patch on this rank. Returns the number of faces (0 if this rank

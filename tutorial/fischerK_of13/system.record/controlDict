@@ -1,0 +1,32 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Recording of the rCFD database on the frozen flow: the converged fields of job 1 are read
+// as time 0, no flow is solved, only the function object rCFDPrep runs (system/functions).
+
+solver          functions;
+subSolver       incompressibleFluid;
+
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         0.0301;         // start of the recording (one frame interval) + two frames
+deltaT          0.0005;         // must divide the frame interval (0.01 s)
+
+writeControl    adjustableRunTime;
+writeInterval   1;              // no fields are written: the database is the result
+purgeWrite      1;
+writeFormat     binary;
+writePrecision  8;
+writeCompression off;
+timeFormat      general;
+timePrecision   8;
+runTimeModifiable yes;
+adjustTimeStep  no;
+
+// ************************************************************************* //

@@ -1,0 +1,43 @@
+FoamFile
+{
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Steady flow of the liquid, as 0.orig/U of the reacting case: 1 mL/s through the inlet
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   uniform (0 0 0);
+
+boundaryField
+{
+    #includeEtc "caseDicts/setConstraintTypes"   // non-conformal couples and processor patches
+
+    inlet
+    {
+        type            flowRateInletVelocity;
+        volumetricFlowRate 1e-06;
+        value           $internalField;
+    }
+    outlet
+    {
+        type            inletOutlet;
+        inletValue      uniform (0 0 0);
+        value           $internalField;
+    }
+    "(latticeStructure|reactingWall)"
+    {
+        type            noSlip;
+    }
+    // What is left of the side patches after the coupling (no area where the
+    // two sides cover each other)
+    "(top|bottom|left|right)"
+    {
+        type            slip;
+    }
+}
+
+// ************************************************************************* //

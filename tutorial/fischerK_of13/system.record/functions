@@ -1,0 +1,31 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      functions;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+rCFDPrep1
+{
+    type            rCFDPrep;
+    libs            ("librCFDFunctionObjects.so");
+
+    phases          (fluid);
+
+    fields
+    {
+        fluid { alpha none; flux phi; rho none; }
+    }
+
+    recordStart     0.01;               // s; frames of 0.01 s (rCFD/rCFD_user_prep.h)
+
+    // At most two label sub-steps per time step: the few very small cells in fast flow
+    // would otherwise ask for many more
+    labelMaxCo          1;
+    maxLabelSubCycles   2;
+
+    writeFields     no;
+}
+
+// ************************************************************************* //

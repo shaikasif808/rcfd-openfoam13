@@ -12,6 +12,7 @@ Same workflow as with Fluent: two user headers per case, compile, prepare, run.
 | `tutorial/fluidisedBed` | multiphaseEuler tutorial, size classes with drift |
 | `tutorial/aeratedStirredTank` | gas-liquid tank with MRF, species in the gas |
 | `tutorial/latticeReactions` | steady flow through a periodic lattice, diffusion and reactions on the frozen flow |
+| `tutorial/fischerK_of13` | the 16 million cell lattice case on the cluster: job 1 mesh conversion and steady flow, job 2 recording and rCFD run |
 | `tutorial/GF25_fluidized` | GF25 fluidised bed, Euler-Euler with kinetic theory, with geometry and job script |
 | `docs/manual.md` | the manual: use, what was built and why, internals, change log |
 
@@ -204,6 +205,12 @@ stored in the build), so a forgotten compile cannot go unnoticed.
   exchange `D |A| / d (c1 - c0)` across every face in sub-steps and couple it with a
   reaction that happens only in the cells at a wall (`tutorial/latticeReactions`,
   `diffuse_and_react`). The library's own face swap is not used there.
+* The explicit exchange needs a sub-step that scales with the square of the smallest cell.
+  For meshes with thin cells at the wall the same header has an implicit diffusion step
+  (`_diffusion_in_header 2`, `diffuse_and_react_implicit`): one conjugate-gradient solve per
+  species and sub-step, the wall reaction inside the solve of the reactant.
+  `rcfd_update_corona_field(handle, array)` fills the copies of the cells of the neighbour
+  processors for an array of the header (the search direction of the iteration).
 * The example header: gas with one data, solids with `_number_of_particle_fractions` size
   classes and the drift law `u_i = -k_d (d_i - d32)|d_i - d32|`. Three classes instead of
   two: `_number_of_particle_fractions 3` and three entries in `Diameter[]` and
@@ -316,6 +323,9 @@ case of your own.
   A 0.0077 / 0.0052, C 0.173 / 0.175, D 0.347 / 0.340, E 0.470 / 0.476; 50 s against
   390 s. The same numbers with cyclic sides and with non-conformal sides (816 886 and
   816 892 shifts). Frames of 5 to 100 ms: C, D and E within 0.03 of the reference.
+* latticeReactions with the implicit diffusion step, frames of 20 ms: E at the outlet 0.457,
+  0.462, 0.466, 0.467 with 1, 2, 4, 8 sub-steps per step, 0.470 with the explicit sub-steps,
+  0.4765 in the reference; 9 to 12 iterations per solve on this mesh.
 * Periodic box with uniform oblique flow, two blocks with 12 x 12 and 18 x 18 faces at the
   periodic sides and at the interface between them (non-conformal couples), 4 processors:
   the recorded displacement is the exact one in every cell (106.30 mm rms and max); the

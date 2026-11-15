@@ -103,6 +103,12 @@ int rcfd_patch_faces(void *handle, const char *patch, const int **cells, const d
 int rcfd_face_distance(void *handle, const double **distance);
 int rcfd_update_corona(void *handle, int i_phase);
 
+/* rcfd_update_corona_field: the same for one array of the user header with one value per cell,
+ * length rcfd_get_cell_count (cells of this processor first, then the copies of cells of the
+ * other processors): the copies are filled. For iterative solvers written in the header (an
+ * implicit diffusion step needs the search direction in the neighbour cells). Returns 0. */
+int rcfd_update_corona_field(void *handle, double *field);
+
 #ifdef __cplusplus
 }
 #endif

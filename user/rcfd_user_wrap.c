@@ -37,6 +37,7 @@ int    rcfd_patch_faces(void *handle, const char *patch, const int **cells, cons
 }
 int    rcfd_face_distance(void *handle, const double **distance)           { (void)handle; if(distance) *distance = NULL; return -1; }
 int    rcfd_update_corona(void *handle, int i_phase)                       { (void)handle; (void)i_phase; return -1; }
+int    rcfd_update_corona_field(void *handle, double *field)               { (void)handle; (void)field; return -1; }
 
 #else
 
@@ -46,6 +47,7 @@ double *rcfd_run_user_field(void *handle, const char *name);
 int    rcfd_run_patch_faces(void *handle, const char *patch, const int **cells, const double **areas, const double **centres);
 int    rcfd_run_face_distance(void *handle, const double **distance);
 int    rcfd_run_update_corona(void *handle, int i_phase);
+int    rcfd_run_update_corona_field(void *handle, double *field);
 
 int    rcfd_foam_register(void *handle, const char *name, void (*f)(void)) { return rcfd_run_register_user_function(handle, name, f); }
 void   fluent_set_cell_dict(void *handle, const short i_layer)             { (void)handle; (void)i_layer; }   /* counts are read from data/topo */
@@ -57,6 +59,7 @@ int    rcfd_patch_faces(void *handle, const char *patch, const int **cells, cons
 }
 int    rcfd_face_distance(void *handle, const double **distance)           { return rcfd_run_face_distance(handle, distance); }
 int    rcfd_update_corona(void *handle, int i_phase)                       { return rcfd_run_update_corona(handle, i_phase); }
+int    rcfd_update_corona_field(void *handle, double *field)               { return rcfd_run_update_corona_field(handle, field); }
 
 #endif
 

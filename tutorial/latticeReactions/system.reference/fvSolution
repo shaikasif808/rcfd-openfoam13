@@ -54,18 +54,6 @@ solvers
     }
 }
 
-SIMPLE
-{
-    nNonOrthogonalCorrectors 0;
-    consistent      no;
-
-    residualControl
-    {
-        p               1e-5;
-        U               1e-6;
-    }
-}
-
 PIMPLE
 {
     nOuterCorrectors 1;

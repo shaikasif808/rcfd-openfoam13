@@ -46,23 +46,20 @@ solvers
     }
 }
 
-SIMPLE
+// The solver modules of OpenFOAM-13 read their controls from PIMPLE, also for a steady
+// case: the run stops when the initial residuals fall below residualControl.
+PIMPLE
 {
     nNonOrthogonalCorrectors 0;
-    consistent      no;
 
     residualControl
     {
         p               1e-5;
         U               1e-6;
     }
-}
 
-PIMPLE
-{
-    nOuterCorrectors 1;
-    nCorrectors     2;
-    nNonOrthogonalCorrectors 0;
+    pRefCell        0;
+    pRefValue       0;
 }
 
 relaxationFactors
