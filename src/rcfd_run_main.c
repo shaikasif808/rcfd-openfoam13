@@ -90,6 +90,86 @@ static void run_read_patches(int n_int)
     g_n_patches = n;
 }
 
+/* ------------------------------------------------------------------------- */
+/* faces for user code: distance of the two cell centres, corona update        */
+/* ------------------------------------------------------------------------- */
+
+static double *g_face_dist = NULL;
+
+/* library routine (rCFD_parallel.h): values of all data of a phase from the cells to their
+ * corona copies on the other ranks */
+int parallel_map_phase_data(void *rcfd, int i_phase);
+
+/* distance of the cell centres of every face; across a periodic patch the distance through
+ * the patch (data/topo/periodic_<rank>), not that of the two positions */
+static void run_set_face_distances(void)
+{
+    char    name[256];
+    FILE    *f;
+    int     i, d, n = 0, face;
+    double  dist;
+    long long loc = 0, sum = 0;
+
+    g_face_dist = (double*)of_malloc((size_t)(of_topo.n_faces > 0 ? of_topo.n_faces : 1) * sizeof(double), "face distances");
+
+    for(i = 0; i < of_topo.n_faces; i++){
+
+        double s2 = 0.0;
+
+        for(d = 0; d < 3; d++){
+
+            double dx = of_topo.x[3 * of_topo.c1[i] + d] - of_topo.x[3 * of_topo.c0[i] + d];
+
+            s2 += dx * dx;
+        }
+
+        g_face_dist[i] = sqrt(s2);
+    }
+
+    snprintf(name, sizeof(name), "data/topo/periodic_%d", of_rank);
+
+    f = fopen(name, "r");
+
+    if(f != NULL){
+
+        if(fscanf(f, "%d", &n) != 1 || n < 0) of_abort("'%s': bad number of faces", name);
+
+        for(i = 0; i < n; i++){
+
+            if(fscanf(f, "%d %lf", &face, &dist) != 2 || face < 0 || face >= of_topo.n_faces || !(dist > 0.0))
+                of_abort("'%s': entry %d of %d cannot be used", name, i, n);
+
+            g_face_dist[face] = dist;
+        }
+
+        fclose(f);
+
+        loc = n;
+    }
+
+    MPI_Allreduce(&loc, &sum, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+
+    if(sum > 0) of_msg("%lld faces across periodic patches (counted on both sides where the two cells are on different ranks)", sum);
+}
+
+/* udf.h */
+int rcfd_run_face_distance(void *handle, const double **distance)
+{
+    (void)handle;
+
+    if(distance) *distance = g_face_dist;
+
+    return (g_face_dist != NULL) ? of_topo.n_faces : -1;
+}
+
+/* udf.h */
+int rcfd_run_update_corona(void *handle, int i_phase)
+{
+    if(of_size < 2) return 0;
+
+    return parallel_map_phase_data(handle, i_phase);
+}
+
 /* udf.h: faces of a boundary patch on this rank. Returns the number of faces (0 if this rank
  * has none), -1 if the database has no patch of that name. cells, areas, centres may be NULL. */
 int rcfd_run_patch_faces(void *handle, const char *patch, const int **cells, const double **areas, const double **centres)
@@ -522,6 +602,7 @@ int main(int argc, char **argv)
     of_check_topo_global(&of_topo);
 
     run_read_patches(of_topo.n_int);
+    run_set_face_distances();
 
     /* database */
     text = of_read_text_bcast("data/rcfd_db.meta.toml");

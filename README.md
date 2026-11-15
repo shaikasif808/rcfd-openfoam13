@@ -11,6 +11,7 @@ Same workflow as with Fluent: two user headers per case, compile, prepare, run.
 | `py/` | `snap_to_foam.py`: rCFD snapshots to OpenFOAM time directories for ParaView |
 | `tutorial/fluidisedBed` | multiphaseEuler tutorial, size classes with drift |
 | `tutorial/aeratedStirredTank` | gas-liquid tank with MRF, species in the gas |
+| `tutorial/latticeReactions` | steady flow through a periodic lattice, diffusion and reactions on the frozen flow |
 | `tutorial/GF25_fluidized` | GF25 fluidised bed, Euler-Euler with kinetic theory, with geometry and job script |
 | `docs/manual.md` | the manual: use, what was built and why, internals, change log |
 
@@ -152,6 +153,19 @@ stored in the build), so a forgotten compile cannot go unnoticed.
   `reconstructPar` once before `foamRun` (the function object says so if it is missing).
 * The boundary patches are written to `data/topo/patches_<rank>` for the run mode
   (`rcfd_patch_faces`, below).
+* Periodic sides (`cyclic` patches, or non-conformal couples with a translation made by
+  `createNonConformalCouples`; no rotation, the sides must be plane): the labels are then
+  transported as displacements, which are continuous across the sides (`labelForm auto`;
+  `position` and `displacement` force one form). An origin beyond a side is moved to the
+  other side of the domain. Behind every side the library gets a copy of the cells on the
+  other side as neighbours for the interpolation (`periodicImages yes`); the copies are
+  taken out of the database again. In the run the two sides are connected by ordinary
+  faces. The log names the patches, the planes and the number of image cells.
+* A non-conformal couple without transformation (an interface between two mesh parts)
+  connects the cells on its two sides like the cells on the two sides of a face.
+* Frozen flow: a database of a steady flow field needs no flow solution during the
+  recording. `solver functions; subSolver incompressibleFluid;` in `controlDict` reads the
+  converged fields and only runs the function objects (`tutorial/latticeReactions`).
 * A run that ends before all frames are recorded (end time, or a change of `controlDict`
   while it runs) leaves a database with the frames written and a replay path; the log says
   which `number_of_frames` to set in `rCFD_user_run.h`.
@@ -183,6 +197,13 @@ stored in the build), so a forgotten compile cannot go unnoticed.
   `..._target_global` in `user_access_data_after_swap`), otherwise the balance correction
   pulls the mass towards the start value (in the test about half of the species fed was
   taken out again). `tutorial/aeratedStirredTank` shows both.
+* Diffusion and wall reactions in the run header: `rcfd_face_distance(handle, &d)` gives
+  the distance of the two cell centres of every face (across a periodic side the true
+  distance), `rcfd_update_corona(handle, i_phase)` copies the data of the phase to the
+  cells of the neighbour processors. With the face lists of the library a header can then
+  exchange `D |A| / d (c1 - c0)` across every face in sub-steps and couple it with a
+  reaction that happens only in the cells at a wall (`tutorial/latticeReactions`,
+  `diffuse_and_react`). The library's own face swap is not used there.
 * The example header: gas with one data, solids with `_number_of_particle_fractions` size
   classes and the drift law `u_i = -k_d (d_i - d32)|d_i - d32|`. Three classes instead of
   two: `_number_of_particle_fractions 3` and three entries in `Diameter[]` and
@@ -251,6 +272,22 @@ that are still assumed are in `tutorial/GF25_fluidized/README.txt`.
 * Tested for the first 20 ms on 4 processes (meshing, start-up, frames, `rcfd_run`). The
   fluidised state has not been simulated yet.
 
+## Fourth case: reactions on the frozen flow through a periodic lattice
+
+```
+cd rcfd_foam2/tutorial/latticeReactions
+./Allrun                 # mesh, steady flow, recording, rCFD run of 4 s; 4 processors
+./Allrun nonConformal    # the same with non-conformal periodic sides
+./Allrun step 0.005      # afterwards: record and run again with another frame interval
+./Allrun reference       # afterwards: the species solved by OpenFOAM on the same flow
+```
+
+A + wall -> B (instantaneous at the wall), B -> C, C -> D, 2 B -> E in a liquid that flows
+through a Fischer-Koch S lattice (209 104 cubes of 0.2 mm, periodic in x and y). The
+database has two frames of the steady flow; transport, diffusion and reactions are in
+`rCFD/rCFD_user_run.h`. `README.md` in that folder has the numbers and the steps for a
+case of your own.
+
 ## Tested (OpenFOAM-13 built from the 13-master source, Open MPI 4.1, gcc 13)
 
 * `wmake` and `rcfd_compile` without errors or warnings.
@@ -274,9 +311,29 @@ that are still assumed are in `tutorial/GF25_fluidized/README.txt`.
   stays untagged. Without label sub-steps the labels in the rotating zone were useless
   (origin points up to 12 m away). Not tested: the steady state after 15 s, a long run.
 
+* latticeReactions (209 104 cells, 4 processors, sides cut by the decomposition): outlet
+  after 4 s with frames of 20 ms against OpenFOAM's own solution on the same flow:
+  A 0.0077 / 0.0052, C 0.173 / 0.175, D 0.347 / 0.340, E 0.470 / 0.476; 50 s against
+  390 s. The same numbers with cyclic sides and with non-conformal sides (816 886 and
+  816 892 shifts). Frames of 5 to 100 ms: C, D and E within 0.03 of the reference.
+* Periodic box with uniform oblique flow, two blocks with 12 x 12 and 18 x 18 faces at the
+  periodic sides and at the interface between them (non-conformal couples), 4 processors:
+  the recorded displacement is the exact one in every cell (106.30 mm rms and max); the
+  mean position of the sources of a cell is off by 0.2 % of the displacement where the
+  displacement is a whole number of cells, in the cells at the sides as elsewhere.
+* fluidisedBed after the changes for periodic sides: database identical byte by byte.
+
 ## Limits
 
-* Static mesh. Cyclic and other coupled patches apart from processor patches are refused.
+* Static mesh. Periodic sides with a rotation, and coupled patches other than processor,
+  cyclic and non-conformal cyclic patches, are refused. Not tested: periodic sides with
+  more than one phase; drift and `local_diff_on` across periodic sides (the library takes
+  the distance of the cell centres there, which is the wrong one across a side).
+* The interpolation of the library takes the source cell and its face neighbours. Where
+  the origin lies outside the tetrahedra they span (the offsets in cell sizes add up to
+  more than one) it falls back to a projection: in the box test with a displacement of
+  1.4 cells that is 3 to 5 % mean error of the source position in a uniform mesh. This is
+  the library, not the periodic sides.
 * The run must use the decomposition (number of processors) of the CFD run that wrote the
   database. Every processor needs at least one cell and one face.
 * A restart of the CFD inside the recording window starts the database again.

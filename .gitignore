@@ -35,3 +35,11 @@ tutorial/fluidisedBed/system/
 tutorial/aeratedStirredTank/0/
 tutorial/aeratedStirredTank/constant/
 tutorial/aeratedStirredTank/system/
+
+# latticeReactions tutorial
+tutorial/*/reference/Make/linux*/
+tutorial/*/reference/lnInclude/
+tutorial/*/referenceRun/
+tutorial/*/0.orig/
+tutorial/*/constant/fvMesh/
+tutorial/latticeReactions/system/

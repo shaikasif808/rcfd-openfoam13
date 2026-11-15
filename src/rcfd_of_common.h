@@ -720,10 +720,15 @@ static void of_read_topo(of_topo_t *T)
 }
 
 /* every global cell must be an internal cell of exactly one rank; corona cells must agree with their owner */
+/* image cells behind periodic patches: the last of_n_images of the n_int cells of this
+ * rank (preparation only, see rcfd_of_images.h); they copy cells of the mesh and are not
+ * counted here */
+static int of_n_images = 0;
+
 static void of_check_topo_global(const of_topo_t *T)
 {
     int     *own_local, *own_global, i, bad = 0, g_bad = 0;
-    long long n_int_sum = 0, n_int = T->n_int;
+    long long n_int_sum = 0, n_int = T->n_int - of_n_images;
 
     MPI_Allreduce(&n_int, &n_int_sum, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
 
@@ -736,7 +741,7 @@ static void of_check_topo_global(const of_topo_t *T)
 
     if(own_local == NULL || own_global == NULL) of_abort("out of memory (ownership check)");
 
-    for(i = 0; i < T->n_int; i++){
+    for(i = 0; i < T->n_int - of_n_images; i++){
 
         if(own_local[T->gid[i]] != 0) of_abort("gid_%d.bin: global cell %d appears twice among the internal cells", of_rank, T->gid[i]);
 

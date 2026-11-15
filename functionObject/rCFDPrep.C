@@ -14,6 +14,12 @@
 #include "zeroGradientFvPatchFields.H"
 #include "processorPolyPatch.H"
 #include "processorCyclicPolyPatch.H"
+#include "cyclicPolyPatch.H"
+#include "processorFvPatch.H"
+#include "processorCyclicFvPatch.H"
+#include "cyclicFvPatch.H"
+#include "HashTable.H"
+#include "labelPair.H"
 #include "syncTools.H"
 #include "labelIOList.H"
 #include "IStringStream.H"
@@ -57,17 +63,271 @@ void Foam::functionObjects::rCFDPrep::cellAndCoronaValues
     const label nInt = mesh_.nCells();
 
     scalarList nbrValues;
-    syncTools::swapBoundaryCellList(mesh_, cellValues, nbrValues);
+    neighbourValues(cellValues, nbrValues);
+
+    const label nImg = imageFace_.size();
 
     forAll(cellValues, celli)
     {
         values[stride*celli + offset] = cellValues[celli];
     }
 
+    // An image cell carries the value of the cell on the other side
+    forAll(imageFace_, i)
+    {
+        values[stride*(nInt + i) + offset] = nbrValues[imageFace_[i]];
+    }
+
     forAll(coronaFace_, i)
     {
-        values[stride*(nInt + i) + offset] = nbrValues[coronaFace_[i]];
+        values[stride*(nInt + nImg + i) + offset] = nbrValues[coronaFace_[i]];
     }
+}
+
+
+void Foam::functionObjects::rCFDPrep::setBoundaryFaces()
+{
+    const fvBoundaryMesh& fvb = mesh_.boundary();
+
+    bfStart_.setSize(fvb.size() + 1);
+
+    label n = 0;
+
+    forAll(fvb, patchi)
+    {
+        bfStart_[patchi] = n;
+        n += fvb[patchi].size();
+    }
+
+    bfStart_[fvb.size()] = n;
+
+    bfCell_.setSize(n);
+    bfSf_.setSize(n);
+
+    forAll(fvb, patchi)
+    {
+        const labelUList& faceCells = fvb[patchi].faceCells();
+        const vectorField& SfP = mesh_.Sf().boundaryField()[patchi];
+
+        forAll(faceCells, i)
+        {
+            bfCell_[bfStart_[patchi] + i] = faceCells[i];
+            bfSf_[bfStart_[patchi] + i] = SfP[i];
+        }
+    }
+}
+
+
+void Foam::functionObjects::rCFDPrep::neighbourValues
+(
+    const scalarField& cellValues,
+    scalarList& nbrValues
+) const
+{
+    // A field with the coupled conditions of the mesh: its coupled patches
+    // know the value on the other side, whatever the kind of coupling
+    volScalarField f
+    (
+        IOobject
+        (
+            "rCFDneighbour",
+            time_.name(),
+            mesh_,
+            IOobject::NO_READ,
+            IOobject::NO_WRITE,
+            false
+        ),
+        mesh_,
+        dimensionedScalar(dimless, 0),
+        zeroGradientFvPatchScalarField::typeName
+    );
+
+    f.primitiveFieldRef() = cellValues;
+    f.correctBoundaryConditions();
+
+    nbrValues.setSize(bfCell_.size());
+    nbrValues = 0;
+
+    forAll(f.boundaryField(), patchi)
+    {
+        if (!mesh_.boundary()[patchi].coupled()) continue;
+
+        const scalarField nbr(f.boundaryField()[patchi].patchNeighbourField());
+
+        forAll(nbr, i)
+        {
+            nbrValues[bfStart_[patchi] + i] = nbr[i];
+        }
+    }
+}
+
+
+void Foam::functionObjects::rCFDPrep::setPeriodic()
+{
+    const polyBoundaryMesh& patches = mesh_.boundaryMesh();
+
+    // Area vector and area-weighted centre of every cyclic patch, over all
+    // processors. The faces of a cyclic patch that lie on a processor
+    // boundary are in processorCyclic patches.
+    // The patches that are not processor patches come first and are the
+    // same on all processors: lists of that length can be combined
+    label nGlobalPatches = 0;
+
+    forAll(patches, patchi)
+    {
+        if (!isA<processorPolyPatch>(patches[patchi]))
+        {
+            nGlobalPatches = patchi + 1;
+        }
+    }
+
+    vectorField sumSf(nGlobalPatches, Zero), sumC(nGlobalPatches, Zero);
+    scalarField sumA(nGlobalPatches, 0);
+
+    forAll(patches, patchi)
+    {
+        const polyPatch& pp = patches[patchi];
+
+        label cyci = -1;
+
+        if (isA<processorCyclicPolyPatch>(pp))
+        {
+            cyci = refCast<const processorCyclicPolyPatch>(pp).referPatchIndex();
+        }
+        else if (isA<cyclicPolyPatch>(pp))
+        {
+            cyci = patchi;
+        }
+
+        if (cyci < 0) continue;
+
+        // Faces of the finite volume patch: for a non-conformal patch the
+        // coupled faces
+        const vectorField& Sf = mesh_.Sf().boundaryField()[patchi];
+        const vectorField& Cf = mesh_.Cf().boundaryField()[patchi];
+
+        forAll(Sf, i)
+        {
+            sumSf[cyci] += Sf[i];
+            sumC[cyci] += mag(Sf[i])*Cf[i];
+            sumA[cyci] += mag(Sf[i]);
+        }
+    }
+
+    Pstream::listCombineGather(sumSf, plusEqOp<vector>());
+    Pstream::listCombineScatter(sumSf);
+    Pstream::listCombineGather(sumC, plusEqOp<vector>());
+    Pstream::listCombineScatter(sumC);
+    Pstream::listCombineGather(sumA, plusEqOp<scalar>());
+    Pstream::listCombineScatter(sumA);
+
+    DynamicList<point> centres;
+    DynamicList<vector> normals, shifts;
+    string names;
+
+    periodicPlaneOfPatch_.setSize(patches.size());
+    periodicPlaneOfPatch_ = -1;
+
+    interfacePatch_.setSize(patches.size());
+    interfacePatch_ = false;
+
+    string interfaceNames;
+
+    forAll(patches, patchi)
+    {
+        if (!isA<cyclicPolyPatch>(patches[patchi])) continue;
+
+        const cyclicPolyPatch& cpp =
+            refCast<const cyclicPolyPatch>(patches[patchi]);
+
+        const label nbri = cpp.nbrPatchIndex();
+
+        if (sumA[patchi] <= 0 || sumA[nbri] <= 0) continue;
+
+        if (cpp.transform().transforms())
+        {
+            FatalErrorInFunction
+                << "Patch " << cpp.name() << ": periodic patches with a "
+                << "rotation are not supported" << exit(FatalError);
+        }
+
+        const vector shift
+        (
+            sumC[nbri]/sumA[nbri] - sumC[patchi]/sumA[patchi]
+        );
+
+        // No shift: an interface inside the domain, not a periodic side
+        if (mag(shift) < 1e-6*sqrt(sumA[patchi]))
+        {
+            interfacePatch_[patchi] = true;
+
+            interfaceNames +=
+                (interfaceNames.size() ? " " : "") + cpp.name();
+
+            continue;
+        }
+
+        // Flat and opposite to its neighbour
+        if
+        (
+            mag(sumSf[patchi]) < 0.9999*sumA[patchi]
+         || mag(sumSf[patchi] + sumSf[nbri]) > 1e-4*sumA[patchi]
+        )
+        {
+            FatalErrorInFunction
+                << "Patch " << cpp.name() << ": a periodic patch must be "
+                << "plane and parallel to its neighbour patch "
+                << patches[nbri].name() << exit(FatalError);
+        }
+
+        periodicPlaneOfPatch_[patchi] = centres.size();
+
+        centres.append(sumC[patchi]/sumA[patchi]);
+        normals.append(sumSf[patchi]/mag(sumSf[patchi]));
+        shifts.append(shift);
+
+        names += (names.size() ? " " : "") + cpp.name();
+    }
+
+    periodicCentre_ = centres;
+    periodicNormal_ = normals;
+    periodicShift_ = shifts;
+
+    displacementForm_ =
+        labelForm_ == "displacement"
+     || (labelForm_ == "auto" && periodicShift_.size());
+
+    if (periodicShift_.size() && !displacementForm_)
+    {
+        FatalErrorInFunction
+            << "The mesh has periodic patches (" << names.c_str() << "): "
+            << "labelForm position cannot be used, the position jumps "
+            << "across them" << exit(FatalError);
+    }
+
+    if (interfaceNames.size())
+    {
+        Info<< type() << " " << name() << ": interfaces inside the domain "
+            << interfaceNames.c_str() << ": the cells on the two sides are "
+            << "neighbours" << nl;
+    }
+
+    if (periodicShift_.size())
+    {
+        Info<< type() << " " << name() << ": periodic patches "
+            << names.c_str() << nl;
+
+        forAll(periodicShift_, k)
+        {
+            Info<< "    plane through " << periodicCentre_[k] << ", normal "
+                << periodicNormal_[k] << ": origin points beyond it are "
+                << "moved by " << periodicShift_[k] << nl;
+        }
+    }
+
+    Info<< type() << " " << name() << ": labels in "
+        << (displacementForm_ ? "displacement" : "position") << " form"
+        << endl;
 }
 
 
@@ -82,7 +342,6 @@ void Foam::functionObjects::rCFDPrep::open()
 
     const label nInt = mesh_.nCells();
     const label nIntFaces = mesh_.nInternalFaces();
-    const polyBoundaryMesh& patches = mesh_.boundaryMesh();
 
     // Cell index in the undecomposed mesh
     labelList gid(identityMap(nInt));
@@ -140,55 +399,108 @@ void Foam::functionObjects::rCFDPrep::open()
 
     const label nGlobal = returnReduce(nInt, sumOp<label>());
 
-    // Values of the cells on the other side of the boundary faces
+    // Values of the cells on the other side of the faces of the coupled
+    // patches (index: list of all patch faces, see setBoundaryFaces)
     labelList nbrGid;
-    syncTools::swapBoundaryCellList(mesh_, gid, nbrGid);
+    {
+        scalarField gidS(nInt);
+        forAll(gidS, celli)
+        {
+            gidS[celli] = gid[celli];
+        }
+
+        scalarList nbr;
+        neighbourValues(gidS, nbr);
+
+        nbrGid.setSize(nbr.size());
+        forAll(nbr, i)
+        {
+            nbrGid[i] = label(nbr[i] + 0.5);
+        }
+    }
 
     const vectorField& C = mesh_.cellCentres();
     const scalarField& V = mesh_.cellVolumes();
     const vectorField& Sf = mesh_.faceAreas();
 
     scalarList nbrV;
-    syncTools::swapBoundaryCellList(mesh_, V, nbrV);
+    neighbourValues(V, nbrV);
 
     FixedList<scalarList, 3> nbrC;
     for (direction d = 0; d < 3; d++)
     {
         const scalarField Cd(C.component(d));
-        syncTools::swapBoundaryCellList(mesh_, Cd, nbrC[d]);
+        neighbourValues(Cd, nbrC[d]);
     }
+
+    const fvBoundaryMesh& fvb = mesh_.boundary();
 
     // Partition faces: the faces of the processor patches
     DynamicList<label> pfFace;
     DynamicList<label> pfHost;
 
-    forAll(patches, patchi)
-    {
-        const polyPatch& pp = patches[patchi];
+    // Faces of interfaces inside the domain with both cells on this
+    // processor
+    DynamicList<label> ifFace;
 
-        if (isA<processorCyclicPolyPatch>(pp))
+    forAll(fvb, patchi)
+    {
+        const fvPatch& fvp = fvb[patchi];
+
+        if (isA<processorCyclicFvPatch>(fvp) || isA<cyclicFvPatch>(fvp))
         {
-            FatalErrorInFunction
-                << "Patch " << pp.name() << ": cyclic patches are not "
-                << "supported" << exit(FatalError);
+            const bool onProcessor = isA<processorCyclicFvPatch>(fvp);
+
+            const label cyci =
+                onProcessor
+              ? refCast<const processorCyclicPolyPatch>
+                (
+                    fvp.patch()
+                ).referPatchIndex()
+              : patchi;
+
+            if (!interfacePatch_[cyci])
+            {
+                // Periodic (conformal or not): no face connection for the
+                // library here. The transport across these patches is in
+                // the labels and the image cells, see setPeriodic()
+            }
+            else if (onProcessor)
+            {
+                const label host =
+                    refCast<const processorFvPatch>(fvp).neighbProcNo();
+
+                forAll(fvp, i)
+                {
+                    pfFace.append(bfStart_[patchi] + i);
+                    pfHost.append(host);
+                }
+            }
+            else
+            {
+                forAll(fvp, i)
+                {
+                    ifFace.append(bfStart_[patchi] + i);
+                }
+            }
         }
-        else if (isA<processorPolyPatch>(pp))
+        else if (isA<processorFvPatch>(fvp))
         {
             const label host =
-                refCast<const processorPolyPatch>(pp).neighbProcNo();
+                refCast<const processorFvPatch>(fvp).neighbProcNo();
 
-            forAll(pp, i)
+            forAll(fvp, i)
             {
-                pfFace.append(pp.start() + i);
+                pfFace.append(bfStart_[patchi] + i);
                 pfHost.append(host);
             }
         }
-        else if (pp.coupled())
+        else if (fvp.coupled())
         {
             FatalErrorInFunction
-                << "Patch " << pp.name() << " of type " << pp.type()
-                << ": coupled patches other than processor patches are not "
-                << "supported" << exit(FatalError);
+                << "Patch " << fvp.name() << " of type " << fvp.type()
+                << ": coupled patches other than processor and cyclic "
+                << "patches are not supported" << exit(FatalError);
         }
     }
 
@@ -200,7 +512,7 @@ void Foam::functionObjects::rCFDPrep::open()
     {
         keys[i].first =
             static_cast<long long>(pfHost[i])*static_cast<long long>(nGlobal)
-          + static_cast<long long>(nbrGid[pfFace[i] - nIntFaces]);
+          + static_cast<long long>(nbrGid[pfFace[i]]);
         keys[i].second = i;
     }
 
@@ -213,7 +525,7 @@ void Foam::functionObjects::rCFDPrep::open()
     {
         if (k == 0 || keys[k].first != keys[k - 1].first)
         {
-            coronaFace.append(pfFace[keys[k].second] - nIntFaces);
+            coronaFace.append(pfFace[keys[k].second]);
         }
 
         pfCorona[keys[k].second] = coronaFace.size() - 1;
@@ -221,13 +533,184 @@ void Foam::functionObjects::rCFDPrep::open()
 
     coronaFace_ = coronaFace;
 
-    const label nExt = coronaFace_.size();
-    const label nCells = nInt + nExt;
-    const label nFaces = nIntFaces + pfFace.size();
+    // Faces across the interfaces inside the domain: one per pair of
+    // cells, from the side of the cell with the lower index
+    DynamicList<label> ifCell0, ifCell1;
+    DynamicList<vector> ifSf;
 
-    // Arrays for the library
+    if (ifFace.size())
+    {
+        Map<label> localCell(2*nInt);
+
+        forAll(gid, celli)
+        {
+            localCell.insert(gid[celli], celli);
+        }
+
+        HashTable<label, labelPair, labelPair::Hash<>> faceOf;
+
+        forAll(ifFace, i)
+        {
+            const label bFacei = ifFace[i];
+            const labelPair cells(bfCell_[bFacei], localCell[nbrGid[bFacei]]);
+
+            if (cells.first() >= cells.second()) continue;
+
+            if (faceOf.found(cells))
+            {
+                ifSf[faceOf[cells]] += bfSf_[bFacei];
+            }
+            else
+            {
+                faceOf.insert(cells, ifCell0.size());
+
+                ifCell0.append(cells.first());
+                ifCell1.append(cells.second());
+                ifSf.append(bfSf_[bFacei]);
+            }
+        }
+    }
+
+    // Image cells: behind every periodic patch one copy of every cell on
+    // the other side that shares a face with a cell here. Across a
+    // non-conformal patch a cell can face several cells: one image per
+    // cell on the other side, one face per pair of cell and image.
+    DynamicList<label> imgFace, imgHost, imgPlane;
+    DynamicList<label> imgFaceCell, imgFaceImage;
+    DynamicList<vector> imgFaceSf;
+
+    if (periodicImages_ && periodicShift_.size())
+    {
+        // (plane, cell on the other side) -> image, (cell, image) -> face
+        HashTable<label, labelPair, labelPair::Hash<>> imageOf, faceOf;
+
+        forAll(fvb, patchi)
+        {
+            const fvPatch& fvp = fvb[patchi];
+            const polyPatch& pp = fvp.patch();
+
+            label cyci = -1;
+            label hostProc = Pstream::myProcNo();
+
+            if (isA<processorCyclicPolyPatch>(pp))
+            {
+                const processorCyclicPolyPatch& pcpp =
+                    refCast<const processorCyclicPolyPatch>(pp);
+
+                cyci = pcpp.referPatchIndex();
+                hostProc = pcpp.neighbProcNo();
+            }
+            else if (isA<cyclicPolyPatch>(pp))
+            {
+                cyci = patchi;
+            }
+
+            if (cyci < 0 || periodicPlaneOfPatch_[cyci] < 0) continue;
+
+            const label planei = periodicPlaneOfPatch_[cyci];
+
+            forAll(fvp, i)
+            {
+                const label bFacei = bfStart_[patchi] + i;
+
+                const labelPair imageKey(planei, nbrGid[bFacei]);
+
+                label imagei = -1;
+
+                if (imageOf.found(imageKey))
+                {
+                    imagei = imageOf[imageKey];
+                }
+                else
+                {
+                    imagei = imgFace.size();
+                    imageOf.insert(imageKey, imagei);
+
+                    imgFace.append(bFacei);
+                    imgHost.append(hostProc);
+                    imgPlane.append(planei);
+                }
+
+                const labelPair faceKey(bfCell_[bFacei], imagei);
+
+                if (faceOf.found(faceKey))
+                {
+                    imgFaceSf[faceOf[faceKey]] += bfSf_[bFacei];
+                }
+                else
+                {
+                    faceOf.insert(faceKey, imgFaceCell.size());
+
+                    imgFaceCell.append(bfCell_[bFacei]);
+                    imgFaceImage.append(imagei);
+                    imgFaceSf.append(bfSf_[bFacei]);
+                }
+            }
+        }
+    }
+
+    imageFace_ = imgFace;
+
+    const label nImg = imageFace_.size();
+    const label nImgFaces = imgFaceCell.size();
+    const label nExt = coronaFace_.size();
+    const label nCells = nInt + nImg + nExt;
+    // Faces between cells of this processor: mesh faces and interfaces
+    const label nOwnFaces = nIntFaces + ifCell0.size();
+    const label nFaces = nOwnFaces + nImgFaces + pfFace.size();
+
+    // Arrays for the library: cells of this processor, image cells, corona
+    // cells; faces between own cells, faces to image cells, partition faces
     std::vector<double> x(3*nCells), vol(nCells), area(3*nFaces);
     std::vector<int> host(nCells), gidAll(nCells), c0(nFaces), c1(nFaces);
+    std::vector<int> imageHost(nImg > 0 ? nImg : 1);
+
+    imageCentre_.setSize(nImg);
+    periodicDepth_.setSize(periodicShift_.size());
+    periodicDepth_ = 0;
+
+    forAll(imageFace_, i)
+    {
+        const label bFacei = imageFace_[i];
+        const label k = imgPlane[i];
+        const label cellj = nInt + i;
+
+        // Where the cell on the other side would be if the mesh continued
+        const point p
+        (
+            point(nbrC[0][bFacei], nbrC[1][bFacei], nbrC[2][bFacei])
+          - periodicShift_[k]
+        );
+
+        imageCentre_[i] = p;
+
+        for (direction d = 0; d < 3; d++)
+        {
+            x[3*cellj + d] = p[d];
+        }
+
+        vol[cellj] = nbrV[bFacei];
+        host[cellj] = Pstream::myProcNo();
+        gidAll[cellj] = nbrGid[bFacei];
+        imageHost[i] = imgHost[i];
+
+        periodicDepth_[k] = max
+        (
+            periodicDepth_[k],
+            2*((p - periodicCentre_[k]) & periodicNormal_[k])
+        );
+    }
+
+    Pstream::listCombineGather(periodicDepth_, maxEqOp<scalar>());
+    Pstream::listCombineScatter(periodicDepth_);
+
+    if (periodicShift_.size())
+    {
+        Info<< type() << " " << name() << ": "
+            << returnReduce(nImg, sumOp<label>())
+            << " image cells behind the periodic patches, depth of the "
+            << "image layers " << periodicDepth_ << endl;
+    }
 
     for (label celli = 0; celli < nInt; celli++)
     {
@@ -243,8 +726,8 @@ void Foam::functionObjects::rCFDPrep::open()
 
     forAll(pfFace, i)
     {
-        const label bFacei = pfFace[i] - nIntFaces;
-        const label cellj = nInt + pfCorona[i];
+        const label bFacei = pfFace[i];
+        const label cellj = nInt + nImg + pfCorona[i];
 
         // Every face of a corona cell carries the same values
         for (direction d = 0; d < 3; d++)
@@ -255,6 +738,32 @@ void Foam::functionObjects::rCFDPrep::open()
         vol[cellj] = nbrV[bFacei];
         host[cellj] = pfHost[i];
         gidAll[cellj] = nbrGid[bFacei];
+    }
+
+    forAll(ifCell0, i)
+    {
+        const label k = nIntFaces + i;
+
+        c0[k] = ifCell0[i];
+        c1[k] = ifCell1[i];
+
+        for (direction d = 0; d < 3; d++)
+        {
+            area[3*k + d] = ifSf[i][d];
+        }
+    }
+
+    forAll(imgFaceCell, i)
+    {
+        const label k = nOwnFaces + i;
+
+        c0[k] = imgFaceCell[i];
+        c1[k] = nInt + imgFaceImage[i];
+
+        for (direction d = 0; d < 3; d++)
+        {
+            area[3*k + d] = imgFaceSf[i][d];
+        }
     }
 
     const labelUList& owner = mesh_.owner();
@@ -273,25 +782,28 @@ void Foam::functionObjects::rCFDPrep::open()
 
     forAll(pfFace, i)
     {
-        const label facei = pfFace[i];
-        const label k = nIntFaces + i;
+        const label bFacei = pfFace[i];
+        const label k = nOwnFaces + nImgFaces + i;
 
-        c0[k] = mesh_.faceOwner()[facei];
-        c1[k] = nInt + pfCorona[i];
+        c0[k] = bfCell_[bFacei];
+        c1[k] = nInt + nImg + pfCorona[i];
 
         // Area vector of a boundary face points out of the own cell
         for (direction d = 0; d < 3; d++)
         {
-            area[3*k + d] = Sf[facei][d];
+            area[3*k + d] = bfSf_[bFacei][d];
         }
     }
 
     rcfd_of_mesh_t m;
 
-    m.n_int = nInt;
+    m.n_int = nInt + nImg;
     m.n_ext = nExt;
-    m.n_fint = nIntFaces;
+    m.n_fint = nOwnFaces + nImgFaces;
     m.n_fext = pfFace.size();
+    m.n_img = nImg;
+    m.n_fimg = nImgFaces;
+    m.img_host = imageHost.data();
     m.n_cells_global = nGlobal;
     m.x = x.data();
     m.vol = vol.data();
@@ -344,35 +856,61 @@ void Foam::functionObjects::rCFDPrep::open()
 
         os.precision(17);
 
-        const polyBoundaryMesh& pbm = mesh_.boundaryMesh();
-        const scalarField magSf(mag(mesh_.faceAreas()));
-        const vectorField& Cf = mesh_.faceCentres();
+        // Faces of the finite volume patches: where a patch is covered by
+        // a non-conformal couple its face areas are (nearly) zero
+        const fvBoundaryMesh& fvb = mesh_.boundary();
 
         label nPatches = 0;
-        forAll(pbm, patchi)
+        forAll(fvb, patchi)
         {
-            if (!pbm[patchi].coupled()) nPatches++;
+            if (!fvb[patchi].coupled()) nPatches++;
         }
 
         os << nPatches << '\n';
 
-        forAll(pbm, patchi)
+        forAll(fvb, patchi)
         {
-            const polyPatch& pp = pbm[patchi];
+            const fvPatch& fvp = fvb[patchi];
 
-            if (pp.coupled()) continue;
+            if (fvp.coupled()) continue;
 
-            const labelUList& faceCells = pp.faceCells();
+            // The error patches of non-conformal couples have no faces in
+            // the polyhedral mesh: they are listed without faces
+            const bool faces = fvp.size() == fvp.patch().size();
 
-            os << pp.name() << ' ' << pp.type() << ' ' << pp.size() << '\n';
+            const labelUList& faceCells = fvp.faceCells();
+            const scalarField& magSf = mesh_.magSf().boundaryField()[patchi];
+            const vectorField& Cf = mesh_.Cf().boundaryField()[patchi];
 
-            forAll(pp, i)
+            if (!faces)
             {
-                const label facei = pp.start() + i;
+                // An empty patch has faces in the polyhedral mesh only
+                const polyPatch& pp = fvp.patch();
+                const labelUList& ppCells = pp.faceCells();
+                const vectorField ppSf(pp.faceAreas());
+                const vectorField ppCf(pp.faceCentres());
 
-                os << faceCells[i] << ' ' << magSf[facei] << ' '
-                   << Cf[facei].x() << ' ' << Cf[facei].y() << ' '
-                   << Cf[facei].z() << '\n';
+                os << pp.name() << ' ' << pp.type() << ' ' << pp.size()
+                   << '\n';
+
+                forAll(pp, i)
+                {
+                    os << ppCells[i] << ' ' << mag(ppSf[i]) << ' '
+                       << ppCf[i].x() << ' ' << ppCf[i].y() << ' '
+                       << ppCf[i].z() << '\n';
+                }
+
+                continue;
+            }
+
+            os << fvp.name() << ' ' << fvp.patch().type() << ' '
+               << fvp.size() << '\n';
+
+            forAll(fvp, i)
+            {
+                os << faceCells[i] << ' ' << magSf[i] << ' '
+                   << Cf[i].x() << ' ' << Cf[i].y() << ' '
+                   << Cf[i].z() << '\n';
             }
         }
     }
@@ -394,7 +932,16 @@ void Foam::functionObjects::rCFDPrep::resetLabels()
     {
         volScalarField& X = labels_[i];
 
-        X.primitiveFieldRef() = mesh_.C().primitiveField().component(i % 3);
+        if (displacementForm_)
+        {
+            X.primitiveFieldRef() = 0;
+        }
+        else
+        {
+            X.primitiveFieldRef() =
+                mesh_.C().primitiveField().component(i % 3);
+        }
+
         X.correctBoundaryConditions();
     }
 }
@@ -525,14 +1072,12 @@ void Foam::functionObjects::rCFDPrep::solveLabels(const label phasei)
         }
 
         scalarList nbrM;
-        syncTools::swapBoundaryCellList(mesh_, m, nbrM);
+        neighbourValues(m, nbrM);
 
-        const polyBoundaryMesh& pbm = mesh_.boundaryMesh();
-
-        forAll(pbm, patchi)
+        forAll(mesh_.boundary(), patchi)
         {
-            const polyPatch& pp = pbm[patchi];
-            const labelUList& faceCells = pp.faceCells();
+            const fvPatch& fvp = mesh_.boundary()[patchi];
+            const labelUList& faceCells = fvp.faceCells();
             const scalarField& fluxP = flux.boundaryField()[patchi];
 
             forAll(fluxP, i)
@@ -540,8 +1085,8 @@ void Foam::functionObjects::rCFDPrep::solveLabels(const label phasei)
                 const label celli = faceCells[i];
 
                 const scalar mf =
-                    pp.coupled()
-                  ? max(m[celli], nbrM[pp.start() + i - mesh_.nInternalFaces()])
+                    fvp.coupled()
+                  ? max(m[celli], nbrM[bfStart_[patchi] + i])
                   : m[celli];
 
                 sumFlux[celli] += mag(fluxP[i])/max(mf, vSmall);
@@ -576,7 +1121,9 @@ void Foam::functionObjects::rCFDPrep::solveLabels(const label phasei)
         nSubFrame_ = max(nSubFrame_, nSub);
     }
 
-    if (nSub > 1)
+    // The displacement form always goes through the sub-step form of the
+    // equation (one sub-step is the plain time step)
+    if (nSub > 1 || displacementForm_)
     {
         // Sub-step k:  (m1 X1 - m0 X0)/dt + div(flux X1) - contErr X1 = 0
         // with the content m = alpha rho interpolated between the old and
@@ -606,6 +1153,58 @@ void Foam::functionObjects::rCFDPrep::solveLabels(const label phasei)
 
         const dField& mRes = tmRes();
 
+        // Displacement form: with X = x + xi the label equation becomes
+        //   ddt(m xi) + div(flux xi) - contErr xi
+        //       = - 1/V sum_faces flux_f (x_f - x_cell)
+        // The right-hand side holds only vectors inside a cell, so xi is
+        // continuous across periodic patches. Faces of boundary patches
+        // that are not coupled give nothing: this is the zero-gradient
+        // condition of the position form (the material that enters
+        // through an inlet comes from the cell itself).
+        tmp<DimensionedField<vector, volMesh>> tSxi;
+
+        if (displacementForm_)
+        {
+            tSxi = new DimensionedField<vector, volMesh>
+            (
+                IOobject("Sxi", time_.name(), mesh_),
+                mesh_,
+                dimensionedVector(flux.dimensions()*dimLength/dimVolume, Zero)
+            );
+
+            vectorField& S = tSxi.ref().primitiveFieldRef();
+
+            const vectorField& C = mesh_.C().primitiveField();
+            const vectorField& Cf = mesh_.Cf().primitiveField();
+            const scalarField& fluxI = flux.primitiveField();
+            const labelUList& own = mesh_.owner();
+            const labelUList& nei = mesh_.neighbour();
+
+            forAll(nei, facei)
+            {
+                S[own[facei]] -= fluxI[facei]*(Cf[facei] - C[own[facei]]);
+                S[nei[facei]] += fluxI[facei]*(Cf[facei] - C[nei[facei]]);
+            }
+
+            forAll(mesh_.boundary(), patchi)
+            {
+                const fvPatch& fvp = mesh_.boundary()[patchi];
+
+                if (!fvp.coupled()) continue;
+
+                const labelUList& faceCells = fvp.faceCells();
+                const scalarField& fluxP = flux.boundaryField()[patchi];
+                const vectorField& CfP = mesh_.Cf().boundaryField()[patchi];
+
+                forAll(faceCells, i)
+                {
+                    S[faceCells[i]] -= fluxP[i]*(CfP[i] - C[faceCells[i]]);
+                }
+            }
+
+            S /= mesh_.V();
+        }
+
         for (label subi = 0; subi < nSub; subi++)
         {
             const scalar f0 = scalar(subi)/nSub;
@@ -629,6 +1228,11 @@ void Foam::functionObjects::rCFDPrep::solveLabels(const label phasei)
                   + fvm::Sp(c1 - contErr.internalField(), X)
                   - fvm::Su(c0*X.internalField(), X)
                 );
+
+                if (displacementForm_)
+                {
+                    tXEqn.ref() -= fvm::Su(tSxi().component(d), X);
+                }
 
                 tXEqn.ref().solve(solverDict_);
             }
@@ -686,12 +1290,16 @@ void Foam::functionObjects::rCFDPrep::solveLabels(const label phasei)
 
 void Foam::functionObjects::rCFDPrep::handOverFrame()
 {
-    const label nCells = mesh_.nCells() + coronaFace_.size();
+    const label nInt = mesh_.nCells();
+    const label nImg = imageFace_.size();
+    const label nCells = nInt + nImg + coronaFace_.size();
     const label nPhases = phaseNames_.size();
 
     // vof[cell*nPhases + phase], origin[(phase*nCells + cell)*3 + direction]
     List<double> vof(nCells*nPhases), origin(nPhases*3*nCells);
+    List<double> displ(nPhases*3*nCells);
 
+    // Box of the whole mesh
     const boundBox& bb = mesh_.bounds();
 
     forAll(phaseNames_, phasei)
@@ -721,17 +1329,104 @@ void Foam::functionObjects::rCFDPrep::handOverFrame()
 
         for (direction d = 0; d < 3; d++)
         {
-            cellAndCoronaValues
-            (
-                labels_[3*phasei + d].primitiveField(),
-                origin,
-                3,
-                offset + d
-            );
+            if (displacementForm_)
+            {
+                // Position the material came from; may lie beyond a
+                // periodic patch
+                const scalarField Xd
+                (
+                    mesh_.C().primitiveField().component(d)
+                  + labels_[3*phasei + d].primitiveField()
+                );
 
-            // An origin cannot lie outside the domain (a limited scheme may
-            // overshoot by a small amount next to a wall)
+                cellAndCoronaValues(Xd, origin, 3, offset + d);
+            }
+            else
+            {
+                cellAndCoronaValues
+                (
+                    labels_[3*phasei + d].primitiveField(),
+                    origin,
+                    3,
+                    offset + d
+                );
+            }
+        }
+
+        // Displacement before the origin is moved through a periodic patch
+        // (for the report of the bridge)
+        for (label i = 0; i < nCells; i++)
+        {
+            for (direction d = 0; d < 3; d++)
+            {
+                displ[offset + 3*i + d] = origin[offset + 3*i + d];
+            }
+        }
+
+        // An image cell is its own origin
+        forAll(imageFace_, i)
+        {
+            for (direction d = 0; d < 3; d++)
+            {
+                origin[offset + 3*(nInt + i) + d] = imageCentre_[i][d];
+                displ[offset + 3*(nInt + i) + d] = imageCentre_[i][d];
+            }
+        }
+
+        // An origin beyond a periodic patch is on the other side of the
+        // domain. There the library finds a cell with all its neighbours;
+        // an image cell has only the cells in front of it as neighbours
+        // and is for the interpolation, not a source to start from.
+        List<bool> inImageLayer(nCells, false);
+
+        if (periodicShift_.size())
+        {
             for (label i = 0; i < nCells; i++)
+            {
+                if (i >= nInt && i < nInt + nImg) continue;
+
+                point p
+                (
+                    origin[offset + 3*i],
+                    origin[offset + 3*i + 1],
+                    origin[offset + 3*i + 2]
+                );
+
+                for (label pass = 0; pass < 2; pass++)
+                {
+                    forAll(periodicShift_, k)
+                    {
+                        const scalar beyond =
+                            (p - periodicCentre_[k]) & periodicNormal_[k];
+
+                        if (beyond > 0)
+                        {
+                            p += periodicShift_[k];
+                        }
+                    }
+                }
+
+                forAll(periodicShift_, k)
+                {
+                    if (((p - periodicCentre_[k]) & periodicNormal_[k]) > 0)
+                    {
+                        inImageLayer[i] = true;
+                    }
+                }
+
+                origin[offset + 3*i] = p.x();
+                origin[offset + 3*i + 1] = p.y();
+                origin[offset + 3*i + 2] = p.z();
+            }
+        }
+
+        // An origin cannot lie outside the domain (a limited scheme may
+        // overshoot by a small amount next to a wall)
+        for (label i = 0; i < nCells; i++)
+        {
+            if (inImageLayer[i] || (i >= nInt && i < nInt + nImg)) continue;
+
+            for (direction d = 0; d < 3; d++)
             {
                 double& x = origin[offset + 3*i + d];
                 x = min(max(x, bb.min()[d]), bb.max()[d]);
@@ -773,19 +1468,62 @@ void Foam::functionObjects::rCFDPrep::handOverFrame()
 
             for (direction d = 0; d < 3; d++)
             {
-                displacement.primitiveFieldRef().replace
-                (
-                    d,
-                    mesh_.C().primitiveField().component(d)
-                  - labels_[3*phasei + d].primitiveField()
-                );
+                if (displacementForm_)
+                {
+                    displacement.primitiveFieldRef().replace
+                    (
+                        d,
+                        -labels_[3*phasei + d].primitiveField()
+                    );
+                }
+                else
+                {
+                    displacement.primitiveFieldRef().replace
+                    (
+                        d,
+                        mesh_.C().primitiveField().component(d)
+                      - labels_[3*phasei + d].primitiveField()
+                    );
+                }
             }
 
             displacement.correctBoundaryConditions();
         }
     }
 
-    rcfd_of_prep_frame(vof.begin(), origin.begin());
+    // displ: unwrapped origin minus the position of the cell or corona cell
+    {
+        scalarList nbrC;
+
+        for (direction d = 0; d < 3; d++)
+        {
+            const scalarField Cd(mesh_.C().primitiveField().component(d));
+            neighbourValues(Cd, nbrC);
+
+            forAll(phaseNames_, phasei)
+            {
+                const label offset = phasei*3*nCells;
+
+                forAll(Cd, celli)
+                {
+                    displ[offset + 3*celli + d] -= Cd[celli];
+                }
+
+                forAll(imageFace_, i)
+                {
+                    displ[offset + 3*(nInt + i) + d] -= imageCentre_[i][d];
+                }
+
+                forAll(coronaFace_, i)
+                {
+                    displ[offset + 3*(nInt + nImg + i) + d] -=
+                        nbrC[coronaFace_[i]];
+                }
+            }
+        }
+    }
+
+    rcfd_of_prep_frame_displ(vof.begin(), origin.begin(), displ.begin());
 }
 
 
@@ -810,6 +1548,16 @@ Foam::functionObjects::rCFDPrep::rCFDPrep
     coFrame_(0),
     nSubFrame_(1),
     writeFields_(false),
+    labelForm_("auto"),
+    displacementForm_(false),
+    periodicCentre_(),
+    periodicNormal_(),
+    periodicShift_(),
+    periodicPlaneOfPatch_(),
+    periodicImages_(true),
+    imageFace_(),
+    imageCentre_(),
+    periodicDepth_(),
     labels_(),
     opened_(false),
     recording_(false),
@@ -860,6 +1608,9 @@ Foam::functionObjects::rCFDPrep::rCFDPrep
             );
         }
     }
+
+    setBoundaryFaces();
+    setPeriodic();
 
     resetLabels();
 
@@ -1009,6 +1760,21 @@ bool Foam::functionObjects::rCFDPrep::read(const dictionary& dict)
             << exit(FatalIOError);
     }
     writeFields_ = dict.lookupOrDefault<Switch>("writeFields", false);
+
+    labelForm_ = dict.lookupOrDefault<word>("labelForm", "auto");
+    periodicImages_ = dict.lookupOrDefault<Switch>("periodicImages", true);
+
+    if
+    (
+        labelForm_ != "auto"
+     && labelForm_ != "position"
+     && labelForm_ != "displacement"
+    )
+    {
+        FatalIOErrorInFunction(dict)
+            << "labelForm must be auto, position or displacement"
+            << exit(FatalIOError);
+    }
 
     return true;
 }

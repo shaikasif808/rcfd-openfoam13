@@ -85,6 +85,24 @@ double *rcfd_user_field(void *handle, const char *name);
  */
 int rcfd_patch_faces(void *handle, const char *patch, const int **cells, const double **areas, const double **centres);
 
+/* For an exchange between neighbour cells written in the user header (a diffusion with a
+ * diffusivity in m2/s, coupled with reactions in sub-steps), in run mode:
+ *
+ * rcfd_face_distance: distance[i] of the two cell centres of face i [m], for all faces of
+ * rcfd_get_face_c0 / rcfd_get_face_c1. Across a periodic patch it is the distance through the
+ * patch. Returns the number of faces, -1 in preparation mode.
+ *
+ * rcfd_update_corona: copies the values of all data of a phase from the cells to their copies
+ * on the other processors (the cells c1 >= rcfd_get_int_cell_count of the faces at a processor
+ * boundary). Call it before every loop over the faces. Returns 0.
+ *
+ *     const double *d; int n = rcfd_face_distance(handle, &d);
+ *     rcfd_update_corona(handle, fluid);
+ *     for(i = 0; i < n; i++){ exchange = D * area_i / d[i] * dt * (data[c1[i]][k] - data[c0[i]][k]); ... }
+ */
+int rcfd_face_distance(void *handle, const double **distance);
+int rcfd_update_corona(void *handle, int i_phase);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,0 +1,124 @@
+#!/bin/sh
+# latticeReactions: reactions on a frozen flow through a periodic lattice
+#
+#   1. makeLatticeMesh.py    stair-step mesh, the sides are periodic (cyclic patches)
+#   2. foamRun               steady flow (incompressibleFluid, system.flow)
+#   3. foamRun               recording on the frozen flow (solver functions, system.record):
+#                            the function object rCFDPrep writes two frames to ./data
+#   4. rCFD/rcfd_run         transport, diffusion and reactions of A, B, C, D, E for 4 s
+#   5. snap_to_foam.py       results for ParaView in ./rCFD_results
+#
+#   ./Allrun                  all steps, frame interval 0.02 s, 4 processors
+#   ./Allrun nonConformal     the same with non-conformal periodic sides
+#                             (createNonConformalCouples instead of cyclic patches)
+#   ./Allrun step 0.005       after ./Allrun: steps 3 to 5 again with another frame interval [s]
+#   ./Allrun reference        after ./Allrun: the species solved by OpenFOAM on the same frozen
+#                             flow (in ./referenceRun, about 7 min on 4 cores) for comparison
+#   ./Allrun clean
+cd "${0%/*}" || exit 1
+
+if [ "$1" = clean ]; then
+    [ -d 0.orig ] && { rm -rf 0; mv 0.orig 0; }      # fields as before ./Allrun nonConformal
+    rm -rf system processor* data out post rCFD_results referenceRun constant/polyMesh constant/fvMesh \
+           0/uniform log.* rCFD/rcfd_run rCFD/*.so rCFD/*.o rCFD_*.out rCFD_*.trn rCFD_*.txt
+    exit 0
+fi
+
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+
+np=4
+py=../../py/snap_to_foam.py
+
+record_and_run()        # $1 = frame interval [s]
+{
+    dt=$1
+    end=$(python3 -c "print(3*$dt + 1e-4)")
+    steps=$(python3 -c "print(int(round(4/$dt)))")
+    snap=$(python3 -c "print(int(round(1/$dt)))")
+
+    rm -rf system data out rCFD_results log.foamRun.record log.rcfd_run log.rcfd_compile log.snap_to_foam
+    for p in processor*; do find "$p" -maxdepth 1 -name "0.*" -exec rm -rf {} +; done
+    cp -r system.record system
+
+    # the frame interval is set in four places: write interval and start of the recording
+    # (OpenFOAM), global_time_step (prep header), _global_time_step (run header)
+    # (the time step of the recording, 1 ms, must divide the frame interval)
+    sed -i "s/^endTime .*/endTime         $end;/; s/^writeInterval .*/writeInterval   $dt;/; s/^deltaT .*/deltaT          0.001;/" system/controlDict
+    sed -i "s/recordStart .*/recordStart     $dt;/" system/functions
+    sed -i "s/\"global_time_step\", [0-9.e-]*)/\"global_time_step\", $dt)/" rCFD/rCFD_user_prep.h
+    sed -i "s/^#define _global_time_step .*/#define _global_time_step   $dt/" rCFD/rCFD_user_run.h
+
+    rcfd_compile > log.rcfd_compile 2>&1 || { echo "rcfd_compile failed, see log.rcfd_compile"; exit 1; }
+
+    runParallel -s record foamRun
+    mpirun -np $np rCFD/rcfd_run -steps "$steps" -snap "$snap" > log.rcfd_run 2>&1 \
+        || { echo "rcfd_run failed, see log.rcfd_run"; exit 1; }
+
+    python3 $py --run . --case . --out rCFD_results > log.snap_to_foam 2>&1
+
+    grep "database written" log.foamRun.record
+    grep "run finished" log.rcfd_run
+    echo "outlet after 4 s (time, A B C D E, then the content of the domain):"
+    tail -1 rCFD_lattice_monitor.out
+}
+
+case "$1" in
+
+step)
+    [ -d processor0/0 ] && [ -n "$2" ] || { echo "usage: ./Allrun step <frame interval in s>, after ./Allrun"; exit 1; }
+    record_and_run "$2"
+    ;;
+
+reference)
+    [ -d processor0/0 ] || { echo "run ./Allrun first"; exit 1; }
+    (cd reference && wmake libso) > log.wmake.reference 2>&1 || { echo "see log.wmake.reference"; exit 1; }
+    rm -rf referenceRun; mkdir referenceRun
+    cp -r constant system.reference referenceRun/; mv referenceRun/system.reference referenceRun/system
+    for p in processor*; do mkdir "referenceRun/$p"; cp -r "$p/constant" "$p/0" "referenceRun/$p/"; done
+    (cd referenceRun && mpirun -np $np foamRun -parallel > log.foamRun 2>&1) \
+        || { echo "reference failed, see referenceRun/log.foamRun"; exit 1; }
+    echo "outlet after 4 s (time, A B C D E): reference, then rCFD"
+    tail -1 referenceRun/reference_monitor.out | cut -d' ' -f1-6
+    tail -1 rCFD_lattice_monitor.out | cut -d' ' -f1-6
+    ;;
+
+""|nonConformal)
+    [ -d processor0 ] && { echo "the case has been run: ./Allrun clean first"; exit 1; }
+
+    python3 makeLatticeMesh.py > log.makeLatticeMesh 2>&1 || { echo "see log.makeLatticeMesh"; exit 1; }
+    cp -r system.flow system
+
+    if [ "$1" = nonConformal ]; then
+        # the four side patches become ordinary patches, coupled in pairs without matching faces
+        cp -r 0 0.orig
+        python3 - <<'PY' || exit 1
+import re
+s = open('constant/polyMesh/boundary').read()
+for n in ('left', 'right', 'bottom', 'top'):
+    s, k = re.subn(r'(\n    %s\n    \{\n)        type            cyclic;\n        neighbourPatch  \w+;\n'
+                   r'        transformType   translational;\n        separation      \([^)]*\);\n' % n,
+                   r'\1        type            patch;\n', s)
+    assert k == 1, n
+open('constant/polyMesh/boundary', 'w').write(s)
+for f, bc in (('0/U', 'type fixedValue; value uniform (0 0 0);'), ('0/p', 'type zeroGradient;')):
+    s = open(f).read(); open(f, 'w').write(re.sub(r'type\s+cyclic;', bc, s))
+PY
+        runApplication createNonConformalCouples -overwrite
+    fi
+
+    runApplication decomposePar
+    runParallel -s flow foamRun
+
+    # the converged flow becomes time 0 of the recording
+    for p in processor*; do
+        last=$(ls -d "$p"/[1-9]* | sed "s|$p/||" | sort -n | tail -1)
+        rm -rf "$p/0"; mv "$p/$last" "$p/0"; rm -rf "$p/0/uniform" "$p"/[1-9]*
+    done
+
+    record_and_run 0.02
+    ;;
+
+*)
+    echo "unknown option $1"; exit 1
+    ;;
+esac

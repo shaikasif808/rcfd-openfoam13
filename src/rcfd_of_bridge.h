@@ -47,6 +47,17 @@ typedef struct {
     const int    *c0, *c1;          /* [n_faces] local cell indices                              */
     const double *area;             /* [3 * n_faces] area vector from c0 to c1                   */
 
+    /* image cells behind periodic patches: the last n_img of the n_int cells of this rank.
+     * An image is a copy of the cell with the same gid on the rank img_host, placed where
+     * that cell would be if the mesh continued. The library treats images as cells of this
+     * rank (neighbours for the interpolation of shifts); the bridge takes them out of the
+     * database again. The faces to image cells are the last n_fimg of the n_fint faces:
+     * one per pair of a cell and an image (across a non-conformal patch a cell can have
+     * several images and an image several cells). */
+    int          n_img;
+    const int    *img_host;         /* [n_img] rank that holds the cell the image copies         */
+    int          n_fimg;            /* faces between own cells and image cells                   */
+
 } rcfd_of_mesh_t;
 
 #define RCFD_OF_MAX_PHASES 8
@@ -84,6 +95,10 @@ RCFD_OF_API int  rcfd_of_prep_open(const rcfd_of_mesh_t *mesh, const rcfd_of_pre
  * origin = position where the material that is in the cell now was one frame interval
  * earlier. Returns the number of frames written so far. */
 RCFD_OF_API int  rcfd_of_prep_frame(const double *vof, const double *origin);
+/* as rcfd_of_prep_frame; displ (same layout as origin, or NULL) is the vector from the cell
+ * to its origin before the origin was moved through a periodic patch. It is used for the
+ * displacement reported per frame only. */
+RCFD_OF_API int  rcfd_of_prep_frame_displ(const double *vof, const double *origin, const double *displ);
 
 RCFD_OF_API int  rcfd_of_prep_frames_written(void);
 

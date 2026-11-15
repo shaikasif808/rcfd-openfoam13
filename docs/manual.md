@@ -95,7 +95,7 @@ The preparation writes the recurrence database while your CFD case runs; you add
 ### Step 0: what the case must offer
 
 - A solver that carries every phase you want to record as an Eulerian phase with its own flux field. For `multiphaseEuler` these are `alpha.<phase>`, `alphaRhoPhi.<phase>` and `rho.<phase>`. Other solvers and single-phase cases: section 1.7.
-- A static mesh. Cyclic and other coupled patches apart from processor patches are refused.
+- A static mesh. Periodic sides without rotation are supported from release r4 (cyclic patches, non-conformal couples); other coupled patches apart from processor patches are refused.
 - A case that runs on its own. Decide the end of the spin-up (statistically steady state) before recording.
 - For a parallel run: the decomposition you will also use for the rCFD run. The database is specific to the number of processors.
 
@@ -553,7 +553,7 @@ Every check stops with a message that names the file to change; the table lists 
 | `Remove executeControl/writeControl` | time control in the entry | remove it |
 | `rCFD_user_prep.h sets number_of_phases = 2, the function object hands over 1 phases` | header and `phases (...)` disagree | make them equal |
 | `request for volScalarField alpha.x from objectRegistry failed` | field name does not exist in this solver | `fields { }`, section 1.7 |
-| `cyclic patches are not supported` / `coupled patches other than processor patches` | mesh has such patches | not supported |
+| `periodic patches with a rotation are not supported` / `coupled patches other than processor and cyclic patches` | mesh has such patches | not supported |
 | `Frame taken at t = ..., ... s after its time` | fixed time step does not divide the frame interval | `adjustTimeStep yes` or a fitting time step |
 | `only N of M frames were written. The database is NOT usable` | CFD ended inside the recording window | raise `endTime`, run again |
 | `Increased the timePrecision` (OpenFOAM warning) | time step cut to meet `recordStart` | harmless |
@@ -664,6 +664,76 @@ Run: the OpenFOAM-13 tutorial on 4 processors, 254 464 cells, 8 frames of 0.025 
 *Figure 12. Test run in my workspace, plane y = 0. Top: gas volume fraction of the frames. Bottom: the species where there is gas. The gas from the sparger ring is tagged and thrown outwards by the lower impeller; the head-space gas drawn down at the shaft is not.*
 
 Not tested: the tutorial at its steady state (15 s), a database of 40 frames, a long rCFD run, the outlet. The frame interval of 0.025 s is the tested value, not an optimised one: during the start-up the liquid in the bulk moved about a sixth of a cell per frame, which makes the transport there diffusive (section 3.7).
+
+## 1.10 Third tutorial: reactions on a frozen flow
+
+Package r4 adds `tutorial/latticeReactions`. A liquid flows steadily through a lattice that is periodic in x and y; species A reacts at the lattice wall to B, and B reacts on to C, D and E. The tutorial answers one question: if the flow field is known, how well does rCFD reproduce transport, diffusion and reactions on it, and at what cost?
+
+### Run it
+
+```
+cd rcfd_foam2/tutorial/latticeReactions
+./Allrun                 # mesh, steady flow, recording, rCFD run of 4 s; 4 processors, about 8 min
+./Allrun nonConformal    # the same with non-conformal periodic sides
+./Allrun step 0.005      # afterwards: record and run again with another frame interval [s]
+./Allrun reference       # afterwards: OpenFOAM solves the species on the same flow (7 min)
+./Allrun clean
+```
+
+`README.md` in the folder lists the files of every step.
+
+### What is different from the other two tutorials
+
+| Topic | Here |
+| --- | --- |
+| Flow | Steady, single phase. Solved once with `incompressibleFluid` (`system.flow`). |
+| Recording | On the frozen flow: `solver functions; subSolver incompressibleFluid;` in `system.record/controlDict` reads the converged fields and runs only `rCFDPrep`. Two frames; the run replays them. |
+| Periodic sides | `cyclic` patches, or non-conformal couples made by `createNonConformalCouples`. The log names the patches, the planes and the number of image cells (section 2.9, release r4). |
+| Diffusion | In the run header, in sub-steps, across all faces: `rcfd_face_distance` and `rcfd_update_corona`. The face swap of the library is switched off. |
+| Wall reaction | In the cells that touch the patch `reactingWall` (`rcfd_patch_faces`), in the same sub-steps as the diffusion. |
+| Mass balance | Open system: the targets are set to the current content every step, as in the stirred tank. |
+
+### Diffusion and reactions in the run header
+
+The wall reaction is far faster than the transport to the wall, so the two cannot be split over a whole rCFD step: diffusion once per step and reaction once per step gives the wrong conversion. `diffuse_and_react` in `rCFD/rCFD_user_run.h` runs both in sub-steps, called from `user_access_data_after_swap`:
+
+```
+n_faces = rcfd_get_face_count(handle, i_layer);
+c0 = rcfd_get_face_c0(handle, i_layer);  c1 = rcfd_get_face_c1(handle, i_layer);
+area = rcfd_get_face_area(handle, i_layer);
+rcfd_face_distance(handle, &distance);          /* distance of the two cell centres of every face */
+
+conductance[i_face] = _diffusivity * |area[i_face]| / distance[i_face];
+
+for every sub-step:
+    rcfd_update_corona(handle, fluid);          /* copies of the cells of the neighbour processors */
+    for every face:    q = conductance * dt_sub * (data[c1] - data[c0]);   c0 gains q, c1 loses q
+    for every cell:    data += change / cell_volume;   then the reactions over dt_sub
+```
+
+The faces across a processor boundary and across a periodic side are in the same list; `rcfd_face_distance` returns the true distance across a periodic side. The number of sub-steps follows from `_max_diffusion_number` (0.25) and the smallest cells; the run prints it once. Here it is 8 sub-steps of 2.5 ms per step of 20 ms.
+
+### What to expect
+
+Mean mass fractions in the cells at the outlet after 4 s, 4 processors, test environment:
+
+| Frame interval | A | C | D | E | Run time |
+| --- | --- | --- | --- | --- | --- |
+| Reference: OpenFOAM, steps of 2 ms | 0.0052 | 0.1752 | 0.3404 | 0.4765 | 392 s |
+| 100 ms | 0.0086 | 0.1653 | 0.3571 | 0.4665 | 27 s |
+| 50 ms | 0.0103 | 0.1729 | 0.3463 | 0.4683 | 33 s |
+| 20 ms | 0.0077 | 0.1727 | 0.3469 | 0.4702 | 43 s |
+| 10 ms | 0.0041 | 0.1652 | 0.3546 | 0.4725 | 62 s |
+| 5 ms | 0.0029 | 0.1583 | 0.3657 | 0.4678 | 88 s |
+
+The products are within 0.03 of the reference for every frame interval. 20 to 50 ms is the best range: the liquid moves 1 to 4 cells per frame in the lattice. Shorter frames do not improve the result. The interpolation of the library uses the source cell and its face neighbours, the shifts then carry a little less than the full displacement where the origin lies close to the cell itself, and that error adds up over more steps. Cyclic and non-conformal sides give the same outlet values to four digits.
+
+### A case of your own
+
+1. Converged steady flow in OpenFOAM-13. A mesh with `cyclicAMI` sides from another OpenFOAM version: set the side patches to `type patch` in `constant/polyMesh/boundary` and couple them with `createNonConformalCouples` (`system.flow/createNonConformalCouplesDict`; `separation` is the position of the first patch minus the position of the second).
+2. `system.record` and `rCFD/` from the tutorial. In `rCFD/rCFD_user_run.h`: patch names, flow rate, density, rate constants.
+3. A frame interval in which the liquid moves one to a few cells in the region of interest.
+4. Cost. Recording: the library searches the source cells by brute force inside each processor, minutes per frame for 250 000 cells per processor. Memory: tables over all cells on every processor for a short time, about 75 bytes per cell of the whole mesh. Run: the diffusion sub-step scales with the square of the smallest cell size.
 
 # Part 2 — From Fluent to OpenFOAM: what was built
 
@@ -1028,7 +1098,7 @@ The preparation is integrated in OpenFOAM; the run mode is a separate program an
 
 | Topic | State |
 | --- | --- |
-| mesh | static only; cyclic and other coupled patches refused |
+| mesh | static only; periodic sides without rotation supported from r4, other coupled patches refused |
 | phases | any number up to 8 with an Eulerian flux each; Lagrangian or DEM solids cannot be recorded |
 | decomposition | the run must use the processors of the preparation; every processor needs a cell and a face |
 | restart inside the recording window | starts the database again |
@@ -1067,6 +1137,34 @@ The species shown in the freeboard (an initial value set in cells without solids
 | The database is closed in the destructor as well, and a recording that stops early stays usable: recurrence path for the frames written, and a message with the `number_of_frames` to set. | `functionObject/rCFDPrep.C`, `src/rcfd_of_bridge.c` | OpenFOAM skips the `end()` call when `endTime` is changed during the run, and a job that reaches its wall time never gets there. In both cases the frames were on disk but the database could not be used. |
 | A clear message when `cellProcAddressing` is missing. | `functionObject/rCFDPrep.C` | A mesh made in parallel by snappyHexMesh without `reconstructPar` stopped the recording without an explanation. |
 | Tutorial `aeratedStirredTank`. | `tutorial/aeratedStirredTank/` | Second multiphase case, species in the gas, open system. |
+
+### Release r4
+
+| Change | Files | Why |
+| --- | --- | --- |
+| Periodic sides: `cyclic` patches and non-conformal couples with a translation. The labels are transported as displacements (`labelForm auto`), an origin beyond a side is moved to the other side of the domain, and behind every side the library gets copies of the cells on the other side as neighbours for the interpolation (`periodicImages yes`). The copies are taken out of the database again. | `functionObject/rCFDPrep.H`, `functionObject/rCFDPrep.C`, `src/rcfd_of_bridge.c`, `src/rcfd_of_bridge.h`, `src/rcfd_of_images.h` (new), `src/rcfd_of_common.h` | The position jumps across a periodic side, so a position label cannot be transported across it. The lattice case is periodic in two directions. |
+| Boundary values and faces are taken from the finite-volume patches, no longer from the patches of the polyhedral mesh. | `functionObject/rCFDPrep.H`, `functionObject/rCFDPrep.C` | The coupled faces of a non-conformal couple exist only in the finite-volume mesh, and one cell can face several cells there. |
+| A non-conformal couple without transformation connects the cells on its two sides like the cells on the two sides of a face. | `functionObject/rCFDPrep.C` | Interfaces between separately meshed parts. |
+| In the run the two sides of a periodic patch are connected by ordinary faces; `data/topo/periodic_<rank>` holds the true distance of the cell centres. New calls for the run header: `rcfd_face_distance`, `rcfd_update_corona`. | `src/rcfd_of_images.h`, `src/rcfd_run_main.c`, `user/udf.h`, `user/rcfd_user_wrap.c` | Diffusion in the run header across all faces, including periodic sides and processor boundaries. |
+| Tutorial `latticeReactions`. | `tutorial/latticeReactions/` | Steady single-phase flow with diffusion and reactions; frozen-flow recording. |
+
+Displacement form: with the position label X = x + ξ the transport equation of X becomes an equation for the displacement ξ with a source from the faces of each cell,
+
+```latex
+\frac{\partial (m\,\xi)}{\partial t} + \nabla\cdot(F\,\xi) - \xi\,\mathrm{contErr} = -\frac{1}{V}\sum_f F_f\,(x_f - x_c)
+```
+
+ξ is continuous across a periodic side, X is not. Faces of boundary patches add nothing to the sum, which is the zero-gradient condition of X.
+
+Checks of r4 in the test environment:
+
+| Check | Result |
+| --- | --- |
+| fluidisedBed, 40 frames, r3 against r4 | Shift, volume-fraction and topology files identical byte by byte. |
+| Periodic box, uniform oblique flow, two blocks with 12 x 12 and 18 x 18 faces at the periodic sides and at the interface between them (non-conformal), 4 processors | Displacement exact in every cell (106.30 mm rms and maximum). Mean position of the sources of a cell off by 0.2 % of the displacement, at the sides as elsewhere, for a displacement of a whole number of cells. |
+| latticeReactions with cyclic sides and with non-conformal sides | 816 886 and 816 892 shifts per frame; outlet values equal to four digits. |
+
+Not tested in r4: periodic sides with more than one phase, the aerated stirred tank, drift and `local_diff_on` across periodic sides (the library takes the distance of the cell centres, which is wrong across a side). Databases of cases without periodic sides do not change.
 
 ### What this means for existing work
 

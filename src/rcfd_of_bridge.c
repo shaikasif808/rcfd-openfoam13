@@ -31,6 +31,8 @@ static rcfd_of_prep_settings_t g_set;
 static void     *g_user_lib = NULL;
 static int      g_interpolation = -1;      /* -1 not known yet, 0 off, 1 on */
 
+#include "rcfd_of_images.h"
+
 /* ------------------------------------------------------------------------- */
 /* user functions of the case                                                 */
 /*                                                                            */
@@ -272,7 +274,7 @@ static void bridge_check_corona(const of_topo_t *T)
 
     if(loc == NULL || glob == NULL) of_abort("out of memory (corona check)");
 
-    for(i = 0; i < T->n_int; i++){
+    for(i = 0; i < N_TRUE(T); i++){
 
         for(d = 0; d < 3; d++) loc[4 * (size_t)T->gid[i] + d] = T->x[3 * i + d];
 
@@ -327,11 +329,16 @@ static void bridge_mkdir(const char *name)
 }
 
 /* data/topo/topo_<rank> (the library's ASCII format, no node section), gid_<rank>.bin, meta.txt */
-static void bridge_write_topo(const of_topo_t *T)
+static void bridge_write_topo(const of_topo_t *T_prep)
 {
     char    name[256];
     FILE    *f;
-    int     i;
+    int     i, *per_face = NULL, n_per = 0;
+    double  *per_dist = NULL;
+    of_topo_t run_topo, *T = &run_topo;
+
+    /* the run mode has no image cells and has the periodic connections as faces */
+    bridge_build_run_topology(T_prep, T, &per_face, &per_dist, &n_per);
 
     bridge_mkdir("data");
     bridge_mkdir("data/topo");
@@ -405,6 +412,34 @@ static void bridge_write_topo(const of_topo_t *T)
 
         fclose(f);
     }
+
+    /* faces across periodic patches: face index and distance of the two cell centres */
+    snprintf(name, sizeof(name), "data/topo/periodic_%d", of_rank);
+
+    f = fopen(name, "w");
+
+    if(f == NULL) of_abort("cannot write '%s': %s", name, strerror(errno));
+
+    fprintf(f, "%d \n", n_per);
+
+    for(i = 0; i < n_per; i++) fprintf(f, "%d %.17e \n", per_face[i], per_dist[i]);
+
+    if(fclose(f) != 0) of_abort("error while writing '%s'", name);
+
+    {
+        long long loc[2], sum[2];
+
+        loc[0] = n_per; loc[1] = T->n_ext - T_prep->n_ext;
+
+        MPI_Allreduce(loc, sum, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+
+        if(sum[0] > 0)
+            of_msg("run topology: %lld faces across periodic patches (counted on both sides where the two cells are on different ranks), %lld corona cells added for them", sum[0], sum[1]);
+    }
+
+    free(per_face); free(per_dist);
+
+    of_free_topo(T);
 }
 
 /* case.cfg for rcfd_of_run, only if there is none */
@@ -475,6 +510,25 @@ static int bridge_open(const rcfd_of_mesh_t *mesh, const rcfd_of_prep_settings_t
 
     if(of_n_cells_global < 1) of_abort("number of cells of the whole mesh: %d", of_n_cells_global);
 
+    g_n_img = mesh->n_img;
+
+    if(g_n_img < 0 || g_n_img >= mesh->n_int) of_abort("%d image cells among %d cells of this rank", g_n_img, mesh->n_int);
+
+    g_img_host = (int*)of_malloc((size_t)(g_n_img > 0 ? g_n_img : 1) * sizeof(int), "image hosts");
+
+    for(i = 0; i < g_n_img; i++){
+
+        g_img_host[i] = mesh->img_host[i];
+
+        if(g_img_host[i] < 0 || g_img_host[i] >= of_size) of_abort("image cell %d: host %d", i, g_img_host[i]);
+    }
+
+    of_n_images = g_n_img;
+
+    g_n_fimg = mesh->n_fimg;
+
+    if(g_n_fimg < 0 || g_n_fimg > mesh->n_fint || (g_n_img > 0) != (g_n_fimg > 0)) of_abort("%d faces to %d image cells among %d faces between cells of this rank", g_n_fimg, g_n_img, mesh->n_fint);
+
     bridge_copy_mesh(&of_topo, mesh);
     of_check_topo_global(&of_topo);
     bridge_check_corona(&of_topo);
@@ -482,12 +536,18 @@ static int bridge_open(const rcfd_of_mesh_t *mesh, const rcfd_of_prep_settings_t
     {
         long long loc[4], sum[4];
 
-        loc[0] = of_topo.n_int; loc[1] = of_topo.n_ext; loc[2] = of_topo.n_fint; loc[3] = of_topo.n_fext;
+        long long img = g_n_img, g_img = 0;
+
+        loc[0] = of_topo.n_int; loc[1] = of_topo.n_ext; loc[2] = of_topo.n_fint - g_n_fimg; loc[3] = of_topo.n_fext;
 
         MPI_Allreduce(loc, sum, 4, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&img, &g_img, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
 
         of_msg("preparation: %d ranks, %d cells; all ranks: %lld corona cells, %lld internal faces, %lld partition faces (counted on both sides)",
                of_size, of_n_cells_global, sum[1], sum[2], sum[3]);
+
+        if(g_img > 0)
+            of_msg("preparation: %lld image cells behind periodic patches (neighbours for the interpolation of the shifts; not in the database)", g_img);
     }
 
     /* library in preparation mode: topology from the solver, everything else from the user header */
@@ -569,11 +629,11 @@ int rcfd_of_prep_frames_written(void)
     return g_frames_written;
 }
 
-static int bridge_frame(const double *vof_in, const double *origin_in)
+static int bridge_frame(const double *vof_in, const double *origin_in, const double *displ_in)
 {
     void    *h = g_h;
     int     i, d, p, err, i_frame = g_frames_written, np = g_n_phases;
-    int     n_cells = of_topo.n_cells, n_int = of_topo.n_int;
+    int     n_cells = of_topo.n_cells, n_int = of_topo.n_int - g_n_img;     /* without image cells */
     long long loc[3 * RCFD_OF_MAX_PHASES], glob[3 * RCFD_OF_MAX_PHASES];
     double  t0, ts, ti, tw;
     double  dl[RCFD_OF_MAX_PHASES], dg[RCFD_OF_MAX_PHASES], ml[RCFD_OF_MAX_PHASES], mg[RCFD_OF_MAX_PHASES];
@@ -629,7 +689,13 @@ static int bridge_frame(const double *vof_in, const double *origin_in)
 
                     g_displ[3 * i + d] = v;
 
-                    s2 += (v - of_topo.x[3 * i + d]) * (v - of_topo.x[3 * i + d]);
+                    if(displ_in != NULL){
+
+                        double u = displ_in[(size_t)p * 3 * (size_t)n_cells + 3 * (size_t)i + d];
+
+                        s2 += u * u;
+                    }
+                    else s2 += (v - of_topo.x[3 * i + d]) * (v - of_topo.x[3 * i + d]);
                 }
 
                 if(i < n_int){
@@ -791,6 +857,8 @@ static int bridge_close(void)
 
     g_h = NULL;
 
+    if(g_frames_written >= 1) bridge_remove_images_from_database(g_frames_written, g_n_phases, vof_files);
+
     if(complete){
 
         for(p = 0; p < g_n_phases; p++){
@@ -827,6 +895,8 @@ static int bridge_close(void)
 
     of_free_topo(&of_topo);
 
+    free(g_img_host); g_img_host = NULL; g_n_img = 0; g_n_fimg = 0; of_n_images = 0;
+
     /* the user library stays loaded: the library may still hold pointers into it */
 
     g_open = 0;
@@ -850,16 +920,21 @@ int rcfd_of_prep_open(const rcfd_of_mesh_t *mesh, const rcfd_of_prep_settings_t 
     return rc;
 }
 
-int rcfd_of_prep_frame(const double *vof, const double *origin)
+int rcfd_of_prep_frame_displ(const double *vof, const double *origin, const double *displ)
 {
     fenv_t env;
     int    rc;
 
     feholdexcept(&env);
-    rc = bridge_frame(vof, origin);
+    rc = bridge_frame(vof, origin, displ);
     fesetenv(&env);
 
     return rc;
+}
+
+int rcfd_of_prep_frame(const double *vof, const double *origin)
+{
+    return rcfd_of_prep_frame_displ(vof, origin, NULL);
 }
 
 int rcfd_of_prep_close(void)

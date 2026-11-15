@@ -138,6 +138,42 @@ class rCFDPrep
         //- Write the displacement of the last frame at write times
         Switch writeFields_;
 
+        //- Form of the labels: "position" (the label is the position the
+        //  material came from) or "displacement" (the label is the vector
+        //  from the cell centre to that position). "auto": displacement if
+        //  the mesh has periodic patches, position otherwise
+        word labelForm_;
+        bool displacementForm_;
+
+        //- Periodic (cyclic) patches: a point beyond the plane (centre,
+        //  outward normal) of a patch is moved by the translation to the
+        //  neighbour patch
+        List<point> periodicCentre_;
+        List<vector> periodicNormal_;
+        List<vector> periodicShift_;
+
+        //- Plane of every patch (-1: not periodic)
+        labelList periodicPlaneOfPatch_;
+
+        //- Cyclic patches without a shift: a non-conformal interface inside
+        //  the domain. The cells on its two sides are neighbours like the
+        //  cells on the two sides of a face.
+        boolList interfacePatch_;
+
+        //- Image cells: behind every face of a periodic patch the library
+        //  gets a copy of the cell on the other side, placed where that cell
+        //  would be if the mesh continued. They give the library a neighbour
+        //  across the periodic patch for the interpolation of the shifts and
+        //  are taken out of the database again by the coupling.
+        Switch periodicImages_;
+
+        //- Boundary face (index in the list of all patch faces) through
+        //  which the values of image cell i are fetched, its
+        //  position and the depth of the image layer behind every plane
+        labelList imageFace_;
+        vectorField imageCentre_;
+        scalarList periodicDepth_;
+
         //- Position labels: [3*phase + direction]
         PtrList<volScalarField> labels_;
 
@@ -149,13 +185,35 @@ class rCFDPrep
         label nLateFrames_;
         scalar cpuLabels_;
 
+        //- Faces of all patches of the finite volume mesh in one list
+        //  (for a non-conformal patch these are its coupled faces, not
+        //  faces of the polyhedral mesh): start of every patch, the cell
+        //  next to every face and its area vector
+        labelList bfStart_;
+        labelList bfCell_;
+        vectorField bfSf_;
+
         //- Corona cells (cells of neighbour processors that share a face):
-        //  boundary face (index minus nInternalFaces) through which the
+        //  boundary face (index in the list above) through which the
         //  values of corona cell i are fetched
         labelList coronaFace_;
 
 
     // Private Member Functions
+
+        //- List the faces of all patches of the finite volume mesh
+        void setBoundaryFaces();
+
+        //- For every face of a coupled patch (processor, cyclic,
+        //  non-conformal cyclic): the value of the cell on the other side
+        void neighbourValues
+        (
+            const scalarField& cellValues,
+            scalarList& nbrValues
+        ) const;
+
+        //- Find the periodic patches and choose the form of the labels
+        void setPeriodic();
 
         //- Build the topology of this processor and open the library
         void open();
