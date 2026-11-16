@@ -18,6 +18,9 @@ Fields: by default the concentration fields c0, c1, ... of the first phase, labe
 (--labels to change); --extra adds every other field of the snapshot (for the lattice case
 sel_CD, share_E, wall_rate). --times 1 2.5 5 picks snapshots near these times.
 
+Many snapshots: --every 5 takes every fifth one; the <species>_times pictures show --montage
+times (default 6, evenly spread); --gif also writes an animation slice_<plane>.gif (needs Pillow).
+
 How a slice is made: a cell belongs to a plane if the plane passes through it (distance of the
 cell centre below half the cell size, cell size = cube root of the volume). Each such cell is
 painted onto a pixel grid (--pixel, default 0.02 mm), large cells first. Pixels that no cell
@@ -223,6 +226,9 @@ def main():
     p.add_argument("--y", type=float, nargs="*", default=[0.0], help="positions of the planes normal to y [mm]")
     p.add_argument("--z", type=float, nargs="*", default=None, help="positions of the planes normal to z [mm]")
     p.add_argument("--times", type=float, nargs="*", default=None, help="snapshot times [s] (default: all)")
+    p.add_argument("--every", type=int, default=1, help="only every N-th snapshot")
+    p.add_argument("--montage", type=int, default=6, help="number of times in the <species>_times pictures (evenly spread)")
+    p.add_argument("--gif", action="store_true", help="also an animation slice_<plane>.gif of the per-time pictures (needs Pillow)")
     p.add_argument("--labels", nargs="*", default=None, help="names of the concentration fields (default A B C ...)")
     p.add_argument("--extra", action="store_true", help="also the other fields of the snapshot")
     p.add_argument("--mark", type=float, nargs=2, default=None, help="two z positions [mm] marked by lines")
@@ -257,9 +263,12 @@ def main():
     if not fields:
         sys.exit("no fields to draw; the snapshots hold: %s" % " ".join(snaps.names))
 
-    it = list(range(len(snaps.times)))
+    it = list(range(len(snaps.times)))[::max(1, a.every)]
     if a.times:
         it = sorted(set(int(np.argmin(np.abs(np.array(snaps.times) - t))) for t in a.times))
+    # times of the montage pictures; the colour scales are taken from these states
+    im_idx = sorted(set(int(round(v)) for v in np.linspace(0, len(it) - 1, max(2, min(a.montage, len(it))))))
+    it_m = [it[k] for k in im_idx]
     zpos = a.z if a.z is not None else [round(0.5e3 * (lo[2] + hi[2]), 3)]
     planes = [(0, 1e-3 * v) for v in a.x] + [(1, 1e-3 * v) for v in a.y] + [(2, 1e-3 * v) for v in zpos]
 
@@ -268,8 +277,9 @@ def main():
         if pl.cells.size == 0:
             print("%s: no cells" % pl.title()); continue
         print("%s: %d cells, %d x %d pixels" % (pl.title(), pl.cells.size, pl.owner.shape[1], pl.owner.shape[0]), flush=True)
-        imgs = {n: [pl.image(snaps.values(i, n, pl.cells)) for i in it] for n, _ in fields}
+        imgs = {n: [pl.image(snaps.values(i, n, pl.cells)) for i in it_m] for n, _ in fields}
         norms = {n: field_norm(n, imgs[n]) for n, _ in fields}
+        frames = []
         ext = pl.extent_mm(); w_mm, h_mm = ext[1] - ext[0], ext[3] - ext[2]
         wide = w_mm > 1.5 * h_mm                       # planes along the flow: panels one below the other
 
@@ -305,17 +315,31 @@ def main():
             axs = axs.ravel()
             for ax, (n, lab) in zip(axs, fields):
                 norm, cmap = norms[n]
-                im = draw(ax, pl, imgs[n][j], norm, cmap, a.mark, pale(n))
+                im = draw(ax, pl, pl.image(snaps.values(i, n, pl.cells)), norm, cmap, a.mark, pale(n))
                 ax.set_title(NICE.get(lab, lab), loc="left")
                 colourbar(fig, im, ax, UNIT.get(n, "mass fraction"))
             label_axes(axs, len(fields), ncol)
             fig.suptitle("%s, t = %.2f s    (%s)" % (pl.title(), snaps.times[i], note), fontsize=9.5, x=0.01, ha="left")
             name = os.path.join(out, "slice_%s_t%07.3f.png" % (pl.tag(), snaps.times[i]))
             fig.savefig(name); plt.close(fig)
+            frames.append(name)
             print("  written %s" % name, flush=True)
 
-        # one field at all times
-        if len(it) > 1:
+        if a.gif and len(frames) > 1:
+            try:
+                from PIL import Image
+                pics = [Image.open(f).convert("RGB") for f in frames]
+                w, h = pics[0].size; sc = min(1.0, 1400.0 / max(w, h))
+                pics = [q.resize((int(w * sc), int(h * sc))) for q in pics]
+                name = os.path.join(out, "slice_%s.gif" % pl.tag())
+                pics[0].save(name, save_all=True, append_images=pics[1:], duration=200, loop=0)
+                print("  written %s (%d frames)" % (name, len(pics)), flush=True)
+            except Exception as e:
+                print("  no animation: %s" % e, flush=True)
+
+        # one field at the montage times
+        if len(it_m) > 1:
+            it_keep, it = it, it_m
             for n, lab in fields:
                 ncol, nrow, size = panel_size(len(it))
                 fig, axs = plt.subplots(nrow, ncol, figsize=size, squeeze=False, constrained_layout=True)
@@ -330,6 +354,7 @@ def main():
                 name = os.path.join(out, "%s_%s_times.png" % (re.sub(r"[^A-Za-z0-9_]+", "_", lab), pl.tag()))
                 fig.savefig(name); plt.close(fig)
                 print("  written %s" % name, flush=True)
+            it = it_keep
 
 
 if __name__ == "__main__":

@@ -25,8 +25,21 @@ Output
                              reacting case (speciesAverages, totalFlux.outlet at z = 10 mm)
   log.rcfd_run               "[user] step N: iterations of the diffusion step ..."
 
+Measured on the 16 million cell mesh (64 processes): recording 2285 s, 13.1 s per rCFD step,
+peak memory 1.5 GB per process in the recording and 0.8 GB in the run.
+
+Longer runs with many snapshots
+  sbatch --export=ALL,STEPS=1500,SNAP=10,FOAM_RESULTS=0 job2_rcfd.sbatch
+  15 s with a snapshot every 0.1 s: 151 snapshots of 0.6 GB in out/ (88 GB), about 5.5 h.
+  FOAM_RESULTS=0 leaves rCFD_results/ out (1 GB more per snapshot); pictures and animations
+  come from out/ directly:
+      python3 <rcfd_foam2>/py/rcfd_slices.py --mark 0 10 --extra --every 5 --gif
+
+Processor folders
+  Once the database is complete the job needs data/, rCFD/ and system.record/ only.
+  processor*/<iterations of job 1> can be removed: the converged flow is in processor*/0.
+  processor*/constant and processor*/0 are needed for a new recording (another frame interval).
+
 Tested with the small lattice mesh (209 104 cells, non-conformal sides, 4 processes): outlet
 after 4 s A 0.0040, C 0.1654, D 0.3570, E 0.4698; OpenFOAM on the same flow 0.0052, 0.1752,
-0.3404, 0.4765. Not tested: the 16 million cell mesh. Unknown there: the time of the recording
-(estimate 10 to 20 min) and the number of iterations of the diffusion step (it decides the
-time of the run). A short test first:   sbatch --export=ALL,STEPS=20,SNAP=0 job2_rcfd.sbatch
+0.3404, 0.4765. A short test first:   sbatch --export=ALL,STEPS=20,SNAP=0 job2_rcfd.sbatch

@@ -24,6 +24,9 @@
 #   sbatch --export=ALL,STEPS=500,SNAP=50 job2_rcfd.sbatch    a snapshot every 0.5 s
 #   sbatch --export=ALL,STEPS=20,SNAP=0 job2_rcfd.sbatch      short test: 20 steps, no snapshot
 #   sbatch --export=ALL,STEPS=0 job2_rcfd.sbatch              recording only
+#   sbatch --export=ALL,STEPS=1500,SNAP=10,FOAM_RESULTS=0 job2_rcfd.sbatch
+#                                                             15 s, a snapshot every 0.1 s, no
+#                                                             rCFD_results/ (slices: rcfd_slices.py)
 STEPS=${STEPS:-500}
 SNAP=${SNAP:-100}
 #
@@ -35,6 +38,11 @@ SNAP=${SNAP:-100}
 # snapshot every 100 steps (6 states): about 10 GB; every 50 steps (11 states): about 18 GB.
 # The recording (first run of this script) added about 5 GB. out/ can be deleted once
 # rCFD_results/ is written; the shift diagnostics rCFD_c2c_step*.txt (about 1 GB) as well.
+# MANY SNAPSHOTS: 150 snapshots are 90 GB in out/ and 150 GB more in rCFD_results/.
+# FOAM_RESULTS=0 leaves rCFD_results/ out; rcfd_slices.py reads out/ directly.
+#
+# Once the database is complete the processor folders are not needed by this script (only a
+# new recording needs processor*/constant and processor*/0).
 
 if [ -z "$RCFD_NO_MODULES" ]; then          # the lines of the of13 function
     conda deactivate 2>/dev/null
@@ -55,14 +63,25 @@ pkg=$(grep -m1 '^RCFD_FOAM_HOME=' "$(command -v rcfd_compile)" | cut -d'"' -f2)
 grep -q rcfd_update_corona_field "$pkg/user/udf.h" 2> /dev/null \
     || stop "the rCFD package in $pkg is older than r5: unpack rcfd_foam2_r5.tar.gz and run ./Allwmake"
 
-[ -d processor0 ]                   || stop "no processor0: run job 1 first"
 [ -f rCFD/rCFD_user_run.h ] && [ -d system.record ] || stop "rCFD/ or system.record/ is missing: unpack fischerK_of13_job2.tar.gz"
 
-np=$(ls -d processor[0-9]* | wc -l)
-[ "$np" = "${SLURM_NTASKS:-$np}" ] || stop "the case is decomposed for $np processes but the job has $SLURM_NTASKS tasks"
+# database complete: its last file is there, and the log of the recording (if kept) says so
+db=0
+if [ -f data/rcfd_db.meta.toml ]; then
+    if [ ! -f log.foamRun.record ] || grep -q "database complete" log.foamRun.record; then db=1; fi
+fi
+
+if [ $db = 1 ]; then
+    np=$(ls data/topo/gid_*.bin 2> /dev/null | wc -l)
+    [ "$np" -gt 0 ] || stop "no data/topo/gid_*.bin: the database is not complete"
+else
+    [ -d processor0 ] || stop "no processor0: run job 1 first"
+    np=$(ls -d processor[0-9]* | wc -l)
+fi
+[ "$np" = "${SLURM_NTASKS:-$np}" ] || stop "the case needs $np processes but the job has $SLURM_NTASKS tasks"
 
 # --- 1. recording ----------------------------------------------------------------------
-if [ -f data/rcfd_db.meta.toml ] && grep -q "database complete" log.foamRun.record 2> /dev/null; then
+if [ $db = 1 ]; then
 
     echo "database in ./data is complete: recording skipped"
 
@@ -134,7 +153,7 @@ tail -1 rCFD_lattice_monitor.out 2> /dev/null
 [ $rc -eq 0 ] || exit $rc
 
 # --- 3. snapshots for ParaView ---------------------------------------------------------------
-if [ "$SNAP" -gt 0 ]; then
+if [ "$SNAP" -gt 0 ] && [ "${FOAM_RESULTS:-1}" = 1 ]; then
     opt=""
     grep -q -- "--binary" "$pkg/py/snap_to_foam.py" && opt="--binary --skip vof" \
         || echo "snap_to_foam.py of this package writes text files only (large): copy the new snap_to_foam.py to $pkg/py"
