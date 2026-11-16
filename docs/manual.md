@@ -799,6 +799,8 @@ In the test of 20 steps (0.2 s) species A had moved 2.2 mm into the inlet sectio
 
 Full run of 5 s, averages over slices of 0.5 mm: at the end of the reacting wall A 0.12, B 0.03, C 0.26, D 0.25, E 0.34; behind it A settles at 0.19, so 81 % of A is converted, and 60 % of the products are C and D. The outlet has not reached its final state after 5 s. The report "Reactions in a lattice reactor" (https://claude.ai/artifact/FtCbyhaAeKuHsce1ey79B6) explains set-up, kinetics, method and results.
 
+Slices without ParaView: `python3 <rcfd_foam2>/py/rcfd_slices.py --mark 0 10 --extra` in the case folder writes pictures of all species on planes normal to x, y and z for every snapshot into `slices/` (options: `--x`, `--y`, `--z` positions in mm, `--times`, `--pixel`).
+
 # Part 2 — From Fluent to OpenFOAM: what was built
 
 ## 2.1 Starting point and reason
