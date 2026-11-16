@@ -920,15 +920,11 @@ The first package `rcfd_foam` had the settings in the function-object entry (`fr
 
 For phase i and one position component X:
 
-```latex
-\frac{\partial (\alpha_i \rho_i X)}{\partial t} + \nabla\cdot(\alpha_i \rho_i \mathbf{u}_i X) - X\left[\frac{\partial (\alpha_i \rho_i)}{\partial t} + \nabla\cdot(\alpha_i \rho_i \mathbf{u}_i)\right] = 0
-```
+![Transport equation of the position label X of phase i](figures/eq_label_transport.png)
 
 The first two terms are the equation of the Fluent user-defined scalar. The bracket is the continuity error of the time step; multiplied by X and subtracted it turns the equation into the pure transport form, so a uniform label stays uniform whatever the solver's continuity residual is. With implicit Euler and upwinding the discrete equation of a cell reads
 
-```latex
-(\alpha\rho)^{o}\,\frac{X_P^{n}-X_P^{o}}{\Delta t} + \sum_{\text{inflow faces}} |F_f|\,(X_P^{n}-X_N^{n}) = 0
-```
+![Discrete label equation of a cell with implicit Euler and upwinding](figures/eq_label_discrete.png)
 
 which has a positive diagonal and non-positive off-diagonals: the new label is an average of the old label and the labels of the upstream neighbours, bounded for any Courant number. A cell that was empty takes the flux-weighted label of what flows in. In code:
 
@@ -1218,9 +1214,7 @@ The species shown in the freeboard (an initial value set in cells without solids
 
 Displacement form: with the position label X = x + ξ the transport equation of X becomes an equation for the displacement ξ with a source from the faces of each cell,
 
-```latex
-\frac{\partial (m\,\xi)}{\partial t} + \nabla\cdot(F\,\xi) - \xi\,\mathrm{contErr} = -\frac{1}{V}\sum_f F_f\,(x_f - x_c)
-```
+![Equation of the displacement with its source from the faces of a cell](figures/eq_displacement.png)
 
 ξ is continuous across a periodic side, X is not. Faces of boundary patches add nothing to the sum, which is the zero-gradient condition of X.
 
@@ -1402,9 +1396,7 @@ One call of `rcfd_run` advances all species of all phases by one frame interval:
 
 Every shift of the current frame says: target cell c1 receives from source cell c0 with weight w. For each species the new value of a target cell is the weighted mean of its sources:
 
-```latex
-c^{new}(c_1) = \frac{\sum_k w_k \, c^{old}(c_{0,k})}{\sum_k w_k}
-```
+![New value of a target cell: weighted mean of its source cells](figures/eq_shift.png)
 
 This is a pull operation: each cell fetches its content. Shifts whose source lies on another processor are served in a second pass (`parallel_shift_data`): the source values are collected, sent and added with the same formula. Because the weights already contain the volume fraction of the sources, the mean is a mass-weighted one.
 
@@ -1416,9 +1408,7 @@ A cell that holds the phase but received no shift takes the weighted mean of its
 
 With the global form (`local_diff_on 0`), every face between cells c0 and c1 exchanges, for each species of type concentration or temperature,
 
-```latex
-\Delta m = D \cdot \min(V_0\alpha_0, V_1\alpha_1) \cdot \tfrac{1}{2}\,(c_1 - c_0)
-```
+![Mass exchanged across a face by the global diffusion form](figures/eq_diffusion_swap.png)
 
 where D is `face_swap_diffusion` of the species (dimensionless: the share of the smaller cell content exchanged per step) and V alpha the phase volume in a cell. Values above `face_swap_max_per_loop` (1/8) are split into several loops. The exchange is symmetric, so it conserves the species. With `local_diff_on 1` the exchange volume comes instead from a recorded diffusivity field: diffusivity x face area / cell distance x time step.
 
@@ -1426,9 +1416,7 @@ where D is `face_swap_diffusion` of the species (dimensionless: the share of the
 
 A species with `drifting_data 1` moves relative to its phase with its `drift_velocity`. Per face and species:
 
-```latex
-V_{drift} = \mathbf{u}_{drift}\cdot\mathbf{A}\,\Delta t, \qquad \Delta m = c(\text{donor}) \; V_{drift} \; \alpha(\text{donor}) \; \rho
-```
+![Drift volume and drift mass per face and species](figures/eq_drift.png)
 
 The donor is the cell the drift velocity points away from. Limits: the drift volume cannot exceed the donor cell volume (so a species moves at most one cell per step), the acceptor cannot take more than its free share (1 - c) of its phase mass, and a face drifts only if both cells hold the phase above `vof_cutoff_limit`. Afterwards the other species are adjusted so that the concentrations of a cell sum to one. Options in the phase dictionary: `hindered_drift_on` (less drift in dense or in dilute regions), `local_drift_on` (velocity rescaled with the local Sauter diameter), `conservative_drift_on` (all drifting species exchanged together so that their fluxes cancel exactly).
 
@@ -1438,9 +1426,7 @@ The example header sets one velocity per size class, `u_i = -k_d (d_i - d32) |d_
 
 Shifts are not conservative: a pull with interpolated, quantised weights does not guarantee that what leaves one cell arrives in others in equal amount. The library therefore tracks for every species the mass integral
 
-```latex
-M = \sum_{cells} c \; V \; \alpha \; \rho
-```
+![Mass integral of a species over all cells](figures/eq_mass_integral.png)
 
 and a target (the initial integral plus the sources announced by the user). The correction distributes the difference over the faces: it sums an available exchange over all faces between cells of different concentration, takes the ratio of the mass error to it, and moves that share from the richer towards the poorer cell (or back), up to `max_correction_loops` times until the error is below `accuracy_level` (0.01). `rCFD_balance.out` lists integral and target per step. The correction acts where concentration gradients are, so it is a small additional mixing; with `max_correction_loops 0` it is off and the integral drifts.
 
@@ -1466,9 +1452,7 @@ The run needs an endless sequence of frames from a finite database. The recurren
 
 During the preparation every frame stores a norm: a small set of numbers that characterises the state of the flow. In this coupling it is the volume fraction of one phase in the cells (subsampled by the library's norm coarsening). After the last frame the library computes the distance between every pair of frames,
 
-```latex
-R_{ij} = \sum_k \left| n_k(i) - n_k(j) \right|
-```
+![Distance between two frames: sum of the absolute differences of their norms](figures/eq_recurrence_norm.png)
 
 summed over the norm values k of all processors. R is the recurrence matrix (`data/rec/matrix_...`): small entries away from the diagonal mark frames in which the flow looked alike.
 
