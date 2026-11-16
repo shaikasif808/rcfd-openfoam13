@@ -753,7 +753,7 @@ The products are within 0.03 of the reference for every frame interval. 20 to 50
 | Job | Steps | Measured on 64 processes |
 | --- | --- | --- |
 | `job1_flow.sbatch` | Copies the mesh from the v2512 case (read only), turns the four `cyclicAMI` patches into ordinary patches and couples them with `createNonConformalCouples`, `decomposePar`, `checkMesh`, steady flow with `incompressibleFluid`. | Coupling: average coverage 0.9999. Flow converged in 614 iterations, 595 s. |
-| `job2_rcfd.sbatch` | Recording on the frozen flow (two frames of 10 ms, `system.record`), then `rcfd_run` with `rCFD/rCFD_user_run.h`, then `snap_to_foam.py --binary`. A second submission skips the recording. | Test of 20 steps done; full run of 500 steps (5 s) open. |
+| `job2_rcfd.sbatch` | Recording on the frozen flow (two frames of 10 ms, `system.record`), then `rcfd_run` with `rCFD/rCFD_user_run.h`, then `snap_to_foam.py --binary`. A second submission skips the recording. | Recording 2 285 s. Run 13.1 s per step of 10 ms (test of 20 steps); the full run of 500 steps (5 s) is done. |
 
 ```
 sbatch fischerK_of13/job1_flow.sbatch
@@ -789,13 +789,15 @@ Fields in `rCFD_results/<time>/`:
 
 | Process | Time |
 | --- | --- |
-| Liquid from the inlet to the lattice (10 mm at 0.01 m/s) | 1 s |
+| Liquid from the inlet to the reacting wall (0.75 mL of liquid at 1 mL/s; the lattice starts at the inlet) | 0.75 s |
 | Mean residence time of the whole domain (2.75 mL at 1 mL/s) | 2.75 s |
 | B -> C | 0.1 s |
 | C -> D | 1 s |
 | 2 B -> E | 0.02 s at B = 1, 0.2 s at B = 0.1, 2 s at B = 0.01 |
 
-In the test of 20 steps (0.2 s) species A had moved 2.2 mm into the inlet section and no reaction had started: the liquid reaches the reacting wall after about 1 s. The mass of A in the domain grew by 9.8e-6 kg per step; the inflow is 992.25 kg/m3 x 1e-6 m3/s x 0.01 s = 9.9e-6 kg.
+In the test of 20 steps (0.2 s) species A had moved 2.2 mm into the inlet section and no reaction had started: the liquid reaches the reacting wall after about 0.75 s. The mass of A in the domain grew by 9.8e-6 kg per step; the inflow is 992.25 kg/m3 x 1e-6 m3/s x 0.01 s = 9.9e-6 kg.
+
+Full run of 5 s, averages over slices of 0.5 mm: at the end of the reacting wall A 0.12, B 0.03, C 0.26, D 0.25, E 0.34; behind it A settles at 0.19, so 81 % of A is converted, and 60 % of the products are C and D. The outlet has not reached its final state after 5 s. The report "Reactions in a lattice reactor" (https://claude.ai/artifact/FtCbyhaAeKuHsce1ey79B6) explains set-up, kinetics, method and results.
 
 # Part 2 — From Fluent to OpenFOAM: what was built
 
