@@ -20,18 +20,21 @@
 #   3. snapshots   snap_to_foam.py for ParaView (rCFD_results/)
 #
 # Number of rCFD steps and snapshot interval (one step = 0.01 s):
-#   sbatch job2_rcfd.sbatch                                   500 steps = 5 s, snapshots at 0 and 5 s
+#   sbatch job2_rcfd.sbatch                                   500 steps = 5 s, a snapshot every 1 s
+#   sbatch --export=ALL,STEPS=500,SNAP=50 job2_rcfd.sbatch    a snapshot every 0.5 s
 #   sbatch --export=ALL,STEPS=20,SNAP=0 job2_rcfd.sbatch      short test: 20 steps, no snapshot
 #   sbatch --export=ALL,STEPS=0 job2_rcfd.sbatch              recording only
 STEPS=${STEPS:-500}
-SNAP=${SNAP:-$STEPS}
+SNAP=${SNAP:-100}
 #
 # Results of an earlier rCFD run in this folder are MOVED to ./rcfd_run_<date>_<time>/ before a
 # new run starts. The database ./data is never removed by this script.
 #
-# Disk space added by this job: about 9 GB (flow as time 0: 1 GB, database 3 to 4 GB, two
-# snapshots 0.8 GB, rCFD_results 2 GB, shift diagnostics rCFD_c2c_step*.txt about 1 GB, which
-# can be deleted after the run). Each further snapshot: 0.4 GB + 1 GB in rCFD_results.
+# A snapshot holds A, B, C, D, E and the fields sel_CD, share_E, wall_rate of all cells:
+# 0.6 GB in out/ and 1 GB in rCFD_results/ (binary). Disk space of a run of 500 steps with a
+# snapshot every 100 steps (6 states): about 10 GB; every 50 steps (11 states): about 18 GB.
+# The recording (first run of this script) added about 5 GB. out/ can be deleted once
+# rCFD_results/ is written; the shift diagnostics rCFD_c2c_step*.txt (about 1 GB) as well.
 
 if [ -z "$RCFD_NO_MODULES" ]; then          # the lines of the of13 function
     conda deactivate 2>/dev/null
@@ -104,7 +107,7 @@ du -sh data | sed 's/^/database: /'
 
 # --- 2. rCFD run --------------------------------------------------------------------------
 old=""
-for f in out rCFD_results log.rcfd_run log.snap_to_foam rCFD_*.out rCFD_run.trn; do
+for f in out rCFD_results log.rcfd_run log.snap_to_foam rCFD_*.out rCFD_c2c_step*.txt rCFD_run.trn; do
     [ -e "$f" ] && old="$old $f"
 done
 if [ -n "$old" ]; then
@@ -132,7 +135,10 @@ tail -1 rCFD_lattice_monitor.out 2> /dev/null
 
 # --- 3. snapshots for ParaView ---------------------------------------------------------------
 if [ "$SNAP" -gt 0 ]; then
-    python3 "$pkg/py/snap_to_foam.py" --run . --case . --out rCFD_results > log.snap_to_foam 2>&1 \
+    opt=""
+    grep -q -- "--binary" "$pkg/py/snap_to_foam.py" && opt="--binary --skip vof" \
+        || echo "snap_to_foam.py of this package writes text files only (large): copy the new snap_to_foam.py to $pkg/py"
+    python3 "$pkg/py/snap_to_foam.py" --run . --case . --out rCFD_results $opt > log.snap_to_foam 2>&1 \
         && echo "ParaView: rCFD_results/rCFD_results.foam" \
         || echo "snap_to_foam.py failed, see log.snap_to_foam (it can be run again on the login node)"
 fi

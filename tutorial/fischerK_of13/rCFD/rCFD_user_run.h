@@ -101,6 +101,7 @@
     static int      Step_count = 0;
     static int      Wall_cell_count = -1;
     static char     *Is_wall_cell = NULL;
+    static double   *Wall_rate = NULL;      /* [1/s] A converted at the wall per cell, mean over the last rCFD step */
 
     /* content of the domain after the last step and mean values at the outlet [kg], [-] */
     static double   Mass_last[Fluid_data_name_count];
@@ -246,6 +247,7 @@
         if(Wall_cell_count >= 0) return;
 
         Is_wall_cell = (char*)calloc((size_t)(int_cell_count > 0 ? int_cell_count : 1), sizeof(char));
+        Wall_rate    = (double*)calloc((size_t)(int_cell_count > 0 ? int_cell_count : 1), sizeof(double));
 
         Wall_cell_count = 0;
 
@@ -377,6 +379,8 @@
 
         dt_sub = _global_time_step / (double)n_sub;
 
+        for(i_cell = 0; i_cell < int_cell_count; i_cell++) Wall_rate[i_cell] = 0.0;
+
         for(i_sub = 0; i_sub < n_sub; i_sub++){
 
             rcfd_update_corona(handle, fluid);
@@ -409,7 +413,11 @@
 
             for(i_cell = 0; i_cell < int_cell_count; i_cell++){
 
+                q = data[i_cell][sA];
+
                 react_cell(data[i_cell], Is_wall_cell[i_cell], dt_sub);
+
+                if(Is_wall_cell[i_cell]) Wall_rate[i_cell] += (q - data[i_cell][sA]) / _global_time_step;
             }
         }
 #endif
@@ -596,6 +604,8 @@
             if(myid == 0) printf("\n[user] implicit diffusion and wall reaction, %d sub-steps of %g s per rCFD step\n", _implicit_substeps, dt);
         }
 
+        for(i_cell = 0; i_cell < int_cell_count; i_cell++) Wall_rate[i_cell] = 0.0;
+
         for(i_sub = 0; i_sub < _implicit_substeps; i_sub++){
 
             set_inlet_cells(handle);
@@ -613,6 +623,8 @@
                     for(i_cell = 0; i_cell < int_cell_count; i_cell++){
 
                         source[i_cell] = Is_wall_cell[i_cell] ? _k_AB_wall * cell_volume[i_cell] * x[i_cell] : 0.0;
+
+                        if(Is_wall_cell[i_cell]) Wall_rate[i_cell] += _k_AB_wall * x[i_cell] / (double)_implicit_substeps;
                     }
                 }
                 else{
@@ -902,6 +914,27 @@
             }
         }
 
+        /* fields for the snapshots (rCFD_<name> in rCFD_results):
+             sel_CD    (C + D) / (C + D + E): share of the products that took the path B -> C -> D
+             share_E   k_BE B / (k_BC + k_BE B): share of the B reacting at this moment that becomes E
+             wall_rate [1/s] A converted to B at the reacting wall in this cell (zero away from the wall) */
+        {
+            double *sel = rcfd_user_field(handle, "sel_CD"), *share = rcfd_user_field(handle, "share_E");
+            double *wall = rcfd_user_field(handle, "wall_rate"), products;
+
+            if(sel && share && wall){
+
+                for(i_cell = 0; i_cell < int_cell_count; i_cell++){
+
+                    products = data[i_cell][sC] + data[i_cell][sD] + data[i_cell][sE];
+
+                    sel[i_cell]   = (products > 1.0e-12) ? (data[i_cell][sC] + data[i_cell][sD]) / products : 0.0;
+                    share[i_cell] = (data[i_cell][sB] > 0.0) ? _k_BE * data[i_cell][sB] / (_k_BC + _k_BE * data[i_cell][sB]) : 0.0;
+                    wall[i_cell]  = Wall_rate ? Wall_rate[i_cell] : 0.0;
+                }
+            }
+        }
+
         /* profile along z */
         if(Step_count % _profile_interval == 0){
 
@@ -934,25 +967,40 @@
                 }
             }
 
+            /* latest state in rCFD_lattice_profile.out; all states one after the other, separated
+               by two empty lines, in rCFD_lattice_profile_history.out. Layers without a cell
+               centre (cells larger than the layer height) are left out. */
             if(myid == 0){
 
-                f_out = fopen("rCFD_lattice_profile.out", "w");
+                static int history_started = 0;
+                int i_file;
 
-                if(f_out){
+                for(i_file = 0; i_file < 2; i_file++){
 
-                    fprintf(f_out, "# time %e s: z [m], mean A B C D E in the layer of cells\n", current_time);
+                    f_out = (i_file == 0) ? fopen("rCFD_lattice_profile.out", "w")
+                                          : fopen("rCFD_lattice_profile_history.out", history_started ? "a" : "w");
+
+                    if(i_file == 1) history_started = 1;
+
+                    if(!f_out) continue;
+
+                    fprintf(f_out, "# time %e s: z [m], mean A B C D E in the layer, volume of the layer [m3]\n", current_time);
 
                     for(k = 0; k < _n_layers; k++){
+
+                        if(sum[k][Fluid_data_name_count] <= 0.0) continue;
 
                         fprintf(f_out, "%e", _z_min + (k + 0.5) * _layer_height);
 
                         for(i_data = 0; i_data < Fluid_data_name_count; i_data++){
 
-                            fprintf(f_out, " %e", (sum[k][Fluid_data_name_count] > 0.0) ? sum[k][i_data] / sum[k][Fluid_data_name_count] : 0.0);
+                            fprintf(f_out, " %e", sum[k][i_data] / sum[k][Fluid_data_name_count]);
                         }
 
-                        fprintf(f_out, "\n");
+                        fprintf(f_out, " %e\n", sum[k][Fluid_data_name_count]);
                     }
+
+                    if(i_file == 1) fprintf(f_out, "\n\n");
 
                     fclose(f_out);
                 }

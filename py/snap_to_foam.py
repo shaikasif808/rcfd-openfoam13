@@ -3,7 +3,7 @@
 snap_to_foam.py - rCFD run snapshots -> OpenFOAM time directories (for ParaView's
                   OpenFOAM reader or OpenFOAM post-processing).
 
-    python3 snap_to_foam.py --run CASE --case CASE --out CASE/rCFD_results [--copy-mesh] [--every K]
+    python3 snap_to_foam.py --run CASE --case CASE --out CASE/rCFD_results [--copy-mesh] [--every K] [--binary] [--skip vof]
 
     --run    directory with out/snap_%06d.bin and out/fields.txt (written by rcfd_run)
     --case   the OpenFOAM case the mesh comes from (constant/polyMesh, ascii or binary)
@@ -58,7 +58,17 @@ def boundary_field_text(patches):
     return s + "}\n"
 
 
-def write_scalar_field(path, name, tname, values, bf_text):
+def write_scalar_field(path, name, tname, values, bf_text, binary=False):
+    if binary:
+        # OpenFOAM binary list: the values as 8-byte floats between the brackets
+        head = header("volScalarField", name, tname).replace(
+            "format      ascii;", "format      binary;\n    arch        \"LSB;label=32;scalar=64\";")
+        with open(str(path), "wb") as f:
+            f.write((head + "dimensions      [0 0 0 0 0 0 0];\n\n"
+                     "internalField   nonuniform List<scalar> \n%d\n(" % len(values)).encode())
+            f.write(np.asarray(values, dtype="<f8").tobytes())
+            f.write((")\n;\n\n" + bf_text + END).encode())
+        return
     with open(str(path), "w") as f:
         f.write(header("volScalarField", name, tname))
         f.write("dimensions      [0 0 0 0 0 0 0];\n\n")
@@ -115,7 +125,10 @@ def main():
     ap.add_argument("--out", required=True, help="results case to create")
     ap.add_argument("--copy-mesh", action="store_true", help="copy constant/polyMesh instead of linking it")
     ap.add_argument("--every", type=int, default=1, help="only every K-th snapshot")
+    ap.add_argument("--binary", action="store_true", help="write the fields in binary format (large meshes: smaller and faster)")
+    ap.add_argument("--skip", default="", help="comma-separated beginnings of field names that are not written, e.g. vof")
     args = ap.parse_args()
+    skip = tuple("rCFD_" + x.strip() for x in args.skip.split(",") if x.strip())
 
     src_pm = Path(args.case).resolve() / "constant" / "polyMesh"
     for name in ("points", "faces", "owner", "neighbour", "boundary"):
@@ -167,9 +180,13 @@ def main():
         d = out / tname
         d.mkdir(exist_ok=True)
         fnames = field_names(len(fields), path.parent)
+        written = []
         for name, values in zip(fnames, fields):
-            write_scalar_field(d / name, name, tname, values, bf_text)
-        print("%s -> %s/{%s}   t = %.10g" % (path.name, d, ",".join(fnames), t), flush=True)
+            if skip and name.startswith(skip):
+                continue
+            write_scalar_field(d / name, name, tname, values, bf_text, args.binary)
+            written.append(name)
+        print("%s -> %s/{%s}   t = %.10g" % (path.name, d, ",".join(written), t), flush=True)
     print("results case %s: %d time directories (%s .. %s), %d cells, %d patches (%s); mesh %s; open %s in ParaView"
           % (out, len(names), names[0], names[-1], n_cells, len(patches),
              ", ".join("%s: %s" % (p["name"], p["type"] if p["type"] in CONSTRAINT_TYPES else "zeroGradient") for p in patches),

@@ -735,6 +735,68 @@ The products are within 0.03 of the reference for every frame interval. 20 to 50
 3. A frame interval in which the liquid moves one to a few cells in the region of interest.
 4. Cost. Recording: the library searches the source cells by brute force inside each processor, minutes per frame for 250 000 cells per processor. Memory: tables over all cells on every processor for a short time, about 75 bytes per cell of the whole mesh. Run: the diffusion sub-step scales with the square of the smallest cell size.
 
+## 1.11 Fourth example: the 16 million cell lattice on the cluster
+
+`tutorial/fischerK_of13` is the lattice case of the reacting OpenFOAM v2512 study (`fischerK_a1_0_b1_0_c1_0`) brought to OpenFOAM-13 and rCFD. The aim is the question of section 1.10 on the real mesh: with the flow field known, how well and how fast does rCFD give the species fields, where the reacting solver needs days?
+
+### The case
+
+| Item | Value |
+| --- | --- |
+| Mesh | 16 263 262 cells from `snappyHexMesh` (v2512), wall layers down to about 1 µm, smallest cell 7.8e-17 m3; the four sides are periodic and do not match face by face |
+| Flow | liquid, 992.25 kg/m3, 0.6527 mPa s, 1 mL/s from z = -10 mm to z = 25 mm, steady and laminar |
+| Reactions | A -> B at the wall patch `reactingWall` (the lattice surface between z = 0 and 10 mm), B -> C, C -> D, 2 B -> E; rates as in section 1.10 |
+| Diffusion | D = 6.578e-7 m2/s for all species (Schmidt number 1, as the reacting solver does) |
+
+### Two jobs
+
+| Job | Steps | Measured on 64 processes |
+| --- | --- | --- |
+| `job1_flow.sbatch` | Copies the mesh from the v2512 case (read only), turns the four `cyclicAMI` patches into ordinary patches and couples them with `createNonConformalCouples`, `decomposePar`, `checkMesh`, steady flow with `incompressibleFluid`. | Coupling: average coverage 0.9999. Flow converged in 614 iterations, 595 s. |
+| `job2_rcfd.sbatch` | Recording on the frozen flow (two frames of 10 ms, `system.record`), then `rcfd_run` with `rCFD/rCFD_user_run.h`, then `snap_to_foam.py --binary`. A second submission skips the recording. | Test of 20 steps done; full run of 500 steps (5 s) open. |
+
+```
+sbatch fischerK_of13/job1_flow.sbatch
+sbatch --export=ALL,STEPS=20,SNAP=0 fischerK_of13/job2_rcfd.sbatch     # test: recording and 20 steps
+sbatch fischerK_of13/job2_rcfd.sbatch                                  # 500 steps = 5 s, a snapshot every 1 s
+```
+
+`STEPS` is the number of rCFD steps of 10 ms, `SNAP` the number of steps between two snapshots; `SNAP=0` writes none.
+
+### Why the diffusion step is implicit here
+
+The explicit exchange of section 1.10 needs a sub-step below `0.25 V / sum(D A / d)` of the smallest cell. With wall cells of 1 µm that is less than a microsecond. `_diffusion_in_header 2` solves diffusion and the wall reaction implicitly, `_implicit_substeps` (4) times per rCFD step; the log prints the number of solver iterations per species.
+
+### Output
+
+| File | Content |
+| --- | --- |
+| `rCFD_lattice_monitor.out` | per step: time, mean A B C D E in the cells at the outlet, mass of A B C D E in the domain [kg] |
+| `rCFD_lattice_profile.out` | latest state: z, volume-weighted mean A B C D E in layers of 0.5 mm, volume of the layer. Compare with the plane averages of the reacting case. |
+| `rCFD_lattice_profile_history.out` | the same every 10 steps, one block per time |
+| `out/snap_*.bin`, `rCFD_results/<time>/` | fields of all cells at the snapshot times, for ParaView (`rCFD_results/rCFD_results.foam`) |
+
+Fields in `rCFD_results/<time>/`:
+
+| Field | Meaning |
+| --- | --- |
+| `rCFD_c0.fluid` ... `rCFD_c4.fluid` | mass fractions of A, B, C, D, E |
+| `rCFD_wall_rate` | A converted to B at the reacting wall in this cell [1/s]; zero away from the wall. Shows which parts of the lattice surface work. |
+| `rCFD_share_E` | share of the B reacting at this moment that becomes E, `k_BE B / (k_BC + k_BE B)`. High where B is concentrated. |
+| `rCFD_sel_CD` | (C + D) / (C + D + E): share of the products that took the path B -> C -> D |
+
+### Times to expect
+
+| Process | Time |
+| --- | --- |
+| Liquid from the inlet to the lattice (10 mm at 0.01 m/s) | 1 s |
+| Mean residence time of the whole domain (2.75 mL at 1 mL/s) | 2.75 s |
+| B -> C | 0.1 s |
+| C -> D | 1 s |
+| 2 B -> E | 0.02 s at B = 1, 0.2 s at B = 0.1, 2 s at B = 0.01 |
+
+In the test of 20 steps (0.2 s) species A had moved 2.2 mm into the inlet section and no reaction had started: the liquid reaches the reacting wall after about 1 s. The mass of A in the domain grew by 9.8e-6 kg per step; the inflow is 992.25 kg/m3 x 1e-6 m3/s x 0.01 s = 9.9e-6 kg.
+
 # Part 2 — From Fluent to OpenFOAM: what was built
 
 ## 2.1 Starting point and reason
