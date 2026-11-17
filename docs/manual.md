@@ -803,6 +803,8 @@ Slices without ParaView: `python3 <rcfd_foam2>/py/rcfd_slices.py --mark 0 10 --e
 
 Many snapshots: `sbatch --export=ALL,STEPS=1500,SNAP=10,FOAM_RESULTS=0 job2_rcfd.sbatch` runs 15 s with a snapshot every 0.1 s (0.6 GB each in `out/`) and leaves the ParaView results out; the slices read `out/` directly. Once the database is complete the job no longer needs the processor folders; `processor*/constant` and `processor*/0` are needed only for a new recording.
 
+Curves against time: the same script also draws the tables of the run (`rCFD_lattice_monitor.out`, `rCFD_lattice_profile_history.out`) into `slices/`: species at the outlet and at positions along z against time, the converted share of A and the selectivity (C + D) / (C + D + E) against time, profiles along z at six times, and maps over position and time. `--plots-only` writes only these in a few seconds, `--stations 5 10 20` sets the positions in mm, and `curves_stations.csv` holds the numbers. The values are volume averages over the cross-section, not flow-weighted.
+
 # Part 2 — From Fluent to OpenFOAM: what was built
 
 ## 2.1 Starting point and reason

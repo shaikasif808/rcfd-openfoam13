@@ -18,6 +18,18 @@ Fields: by default the concentration fields c0, c1, ... of the first phase, labe
 (--labels to change); --extra adds every other field of the snapshot (for the lattice case
 sel_CD, share_E, wall_rate). --times 1 2.5 5 picks snapshots near these times.
 
+Curves (no snapshots needed, from the tables the run writes: rCFD_*_monitor.out and
+rCFD_*_profile_history.out), also into ./slices/:
+    plot_outlet_time.png                    species at the outlet and their mass in the domain against time
+    plot_stations_time.png                  species against time at positions along the flow (--stations, mm)
+    plot_conversion_selectivity_time.png    converted share of the feed and selectivity at these positions
+    plot_profiles.png                       species, conversion and selectivity along the flow at six times
+    plot_maps_z_time.png                    the same as maps over position and time
+    curves_stations.csv                     the numbers of the curves at the positions
+--plots-only writes only these (seconds; works in a folder rcfd_run_<date>_<time>/ as well),
+--no-plots leaves them out. Conversion = share of the feed species that has reacted; selectivity =
+desired / (desired + waste) products: --feed A --desired C D --waste E are the defaults.
+
 Many snapshots: --every 5 takes every fifth one; the <species>_times pictures show --montage
 times (default 6, evenly spread); --gif also writes an animation slice_<plane>.gif (needs Pillow).
 
@@ -43,6 +55,12 @@ PALE = "#f2f2f2"
 NICE = {"sel_CD": "Selectivity (C + D) / (C + D + E)", "share_E": "Share of the reacting B that becomes E",
         "wall_rate": "A converted at the wall"}
 UNIT = {"sel_CD": "share", "share_E": "share", "wall_rate": "1/s"}
+
+
+# colours of the curves: species in a fixed order, positions and times as steps of one blue
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
+RAMP = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
+INK, MUTED, GRID, BAND = "#0b0b0b", "#52514e", "#e4e3df", "#efeee9"
 
 
 # ----------------------------------------------------------------------------- input
@@ -218,6 +236,253 @@ def colourbar(fig, im, ax, label):
     return cb
 
 
+# ----------------------------------------------------------------------------- curves
+def table_names(path, n):
+    with open(path) as f:
+        m = re.search(r"mean (.+?) in the", f.readline())
+    names = m.group(1).split() if m else []
+    return names if len(names) == n else [chr(ord("A") + i) for i in range(n)]
+
+
+def read_monitor(path):
+    """time, mean of every species at the outlet, mass of every species in the domain."""
+    d = np.loadtxt(path, comments="#", ndmin=2)
+    n = (d.shape[1] - 1) // 2
+    d = d[np.isfinite(d[:, 0]) & (d[:, 0] >= 0)][::-1]
+    d = d[np.unique(d[:, 0], return_index=True)[1]]            # a time written twice: the later line
+    return table_names(path, n), d[:, 0], d[:, 1:1 + n], d[:, 1 + n:1 + 2 * n]
+
+
+def read_profiles(path):
+    """states of the layer averages: times, positions z [m], values[time, layer, species]."""
+    times, blocks = [], []
+    with open(path) as f:
+        for line in f:
+            if line.startswith("#"):
+                m = re.search(r"time\s+([-+.\deE]+)", line)
+                times.append(float(m.group(1)) if m else np.nan); blocks.append([])
+            elif line.strip() and blocks:
+                try:
+                    blocks[-1].append([float(v) for v in line.split()])
+                except ValueError:
+                    pass
+    width = max((len(r) for b in blocks for r in b), default=0)
+    state = {}
+    for t, b in zip(times, blocks):
+        b = np.array([r for r in b if len(r) == width])        # a line that is being written is left out
+        if b.size and np.isfinite(t) and t >= 0:
+            state[t] = b
+    if not state:
+        return [], np.zeros(0), np.zeros(0), np.zeros((0, 0, 0))
+    n = width - 2
+    z = np.unique(np.concatenate([b[:, 0] for b in state.values()]))
+    t = np.array(sorted(state))
+    val = np.full((len(t), len(z), n), np.nan)
+    for k, tk in enumerate(t):
+        val[k, np.searchsorted(z, state[tk][:, 0])] = state[tk][:, 1:1 + n]
+    return table_names(path, n), t, z, val
+
+
+def shares(val, names, feed, desired, waste):
+    """converted share of the feed and selectivity; nan where there is nothing to divide."""
+    ix = {n: i for i, n in enumerate(names)}
+    conv = sel = None
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if feed in ix:
+            total = val.sum(-1)
+            conv = np.where(total > 1e-3, (total - val[..., ix[feed]]) / total, np.nan)
+        if desired and waste and all(n in ix for n in desired + waste):
+            good = sum(val[..., ix[n]] for n in desired); bad = sum(val[..., ix[n]] for n in waste)
+            sel = np.where(good + bad > 1e-4, good / (good + bad), np.nan)
+    return conv, sel
+
+
+def style(ax, xlabel=None, ylabel=None, title=None):
+    ax.grid(True, color=GRID, lw=0.6); ax.set_axisbelow(True)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    for s in ("left", "bottom"):
+        ax.spines[s].set_color("#b5b4ae"); ax.spines[s].set_linewidth(0.6)
+    ax.tick_params(colors=MUTED, length=2.5, width=0.5, labelsize=7.5)
+    if xlabel: ax.set_xlabel(xlabel, color=MUTED)
+    if ylabel: ax.set_ylabel(ylabel, color=MUTED)
+    if title: ax.set_title(title, loc="left", color=INK)
+
+
+def end_labels(ax, x, ys, labels, colours):
+    """Names at the right ends of the curves, moved apart where they would overlap."""
+    lo, hi = ax.get_ylim()
+    gap = 0.058 * (hi - lo)
+    item = sorted((y, l, c) for y, l, c in zip(ys, labels, colours) if np.isfinite(y))
+    pos = []
+    for y, _, _ in item:
+        pos.append(max(y, pos[-1] + gap) if pos else max(y, lo + 0.3 * gap))
+    over = pos[-1] - (hi - 0.3 * gap) if pos else 0.0
+    if over > 0:                                           # pushed out at the top: move the stack down
+        pos = [q - over for q in pos]
+        for k in range(len(pos) - 2, -1, -1):
+            pos[k] = min(pos[k], pos[k + 1] - gap)
+    x0, x1 = ax.get_xlim()
+    for (y, l, c), q in zip(item, pos):
+        ax.annotate(l, xy=(x, y), xytext=(x + 0.035 * (x1 - x0), q), color=INK, fontsize=7.5, va="center", ha="left",
+                    arrowprops=dict(arrowstyle="-", color=c, lw=0.7, shrinkA=0, shrinkB=1.5), annotation_clip=False)
+
+
+def ramp(n):
+    return [RAMP[int(round(k))] for k in np.linspace(0, len(RAMP) - 1, max(n, 2))][:n] if n > 1 else [RAMP[4]]
+
+
+def curves(case, out, a):
+    """Pictures of the tables the run writes. Returns the number of pictures."""
+    mon = sorted(glob.glob(os.path.join(case, "rCFD_*_monitor.out")))
+    mon = [f for f in mon if "mean_height" not in f]
+    his = sorted(glob.glob(os.path.join(case, "rCFD_*_profile_history.out")))
+    if not mon and not his:
+        print("no rCFD_*_monitor.out or rCFD_*_profile_history.out in %s: no curves" % os.path.abspath(case), flush=True)
+        return 0
+    done = []
+
+    def save(fig, name):
+        path = os.path.join(out, name)
+        fig.savefig(path); plt.close(fig); done.append(path)
+        print("  written %s" % path, flush=True)
+
+    def legend(fig, handles, labels, title=None):
+        fig.legend(handles, labels, loc="outside lower center", ncol=len(labels), frameon=False, fontsize=7.5,
+                   handlelength=1.6, columnspacing=1.2, title=title, title_fontsize=7.5)
+
+    # --- outlet and content of the domain against time
+    if mon:
+        names, t, outlet, mass = read_monitor(mon[0])
+        if t.size > 1:
+            col = [SERIES[i % len(SERIES)] for i in range(len(names))]
+            fig, axs = plt.subplots(1, 2, figsize=(9.6, 3.5), constrained_layout=True)
+            for ax, v, unit, title in ((axs[0], outlet, "mass fraction", "At the outlet"),
+                                       (axs[1], 1e6 * mass, "mass in mg", "Content of the domain")):
+                hs = [ax.plot(t, v[:, i], color=col[i], lw=1.7)[0] for i in range(len(names))]
+                ax.plot(t, v.sum(1), color=MUTED, lw=0.9, ls=(0, (4, 2)))
+                style(ax, "time in s", unit, title)
+                ax.set_xlim(t[0], t[-1] + 0.09 * (t[-1] - t[0])); ax.set_ylim(bottom=0)
+                end_labels(ax, t[-1], list(v[-1]) + [v[-1].sum()], names + ["sum"], col + [MUTED])
+            legend(fig, hs, names)
+            fig.suptitle("Species against time    (dashed: sum of all species)", fontsize=9.5, x=0.01, ha="left")
+            save(fig, "plot_outlet_time.png")
+
+    if not his:
+        return len(done)
+    names, t, z, val = read_profiles(his[0])
+    if t.size < 2:
+        print("  %s holds fewer than two states: no curves along the flow" % his[0], flush=True)
+        return len(done)
+    zmm = 1e3 * z
+    col = [SERIES[i % len(SERIES)] for i in range(len(names))]
+    conv, sel = shares(val, names, a.feed or names[0], a.desired, a.waste)
+    extra = [(v, lab) for v, lab in ((conv, "Converted share of %s" % (a.feed or names[0])),
+                                     (sel, "Selectivity (%s) / (%s)" % (" + ".join(a.desired), " + ".join(a.desired + a.waste))))
+             if v is not None]
+
+    if a.stations:
+        want = a.stations
+    elif a.mark:
+        want = [0.5 * (a.mark[0] + a.mark[1]), a.mark[1], 0.5 * (a.mark[1] + zmm[-1]), zmm[-1]]
+    else:
+        want = list(np.linspace(zmm[0], zmm[-1], 5)[1:])
+    ks = sorted(set(int(np.argmin(np.abs(zmm - w))) for w in want))
+    st_lab = ["z = %.4g mm" % zmm[k] for k in ks]
+    span = (lambda ax: ax.axvspan(a.mark[0], a.mark[1], color=BAND, lw=0, zorder=0)) if a.mark else (lambda ax: None)
+    note = "    (shaded: z = %g to %g mm)" % tuple(a.mark) if a.mark else ""
+
+    # --- species against time at the positions
+    ncol = min(len(ks), 4); nrow = -(-len(ks) // ncol)
+    fig, axs = plt.subplots(nrow, ncol, figsize=(2.75 * ncol + 0.4, 2.55 * nrow + 0.55), squeeze=False, sharey=True,
+                            constrained_layout=True)
+    top = max(1e-12, np.nanmax(val[:, ks])) * 1.05
+    for j, ax in enumerate(axs.ravel()):
+        if j >= len(ks):
+            ax.set_axis_off(); continue
+        hs = [ax.plot(t, val[:, ks[j], i], color=col[i], lw=1.7)[0] for i in range(len(names))]
+        style(ax, "time in s" if j + ncol >= len(ks) else None, "mass fraction" if j % ncol == 0 else None, st_lab[j])
+        ax.set_xlim(t[0], t[-1] + 0.16 * (t[-1] - t[0])); ax.set_ylim(0, top)
+        end_labels(ax, t[-1], val[-1, ks[j]], names, col)
+    legend(fig, hs, names)
+    fig.suptitle("Species against time at positions along the flow    (averages over the cross-section)", fontsize=9.5,
+                 x=0.01, ha="left")
+    save(fig, "plot_stations_time.png")
+
+    # --- conversion and selectivity against time at the positions
+    if extra:
+        cs = ramp(len(ks))
+        fig, axs = plt.subplots(1, len(extra), figsize=(4.8 * len(extra), 3.5), squeeze=False, constrained_layout=True)
+        for ax, (v, lab) in zip(axs.ravel(), extra):
+            hs = [ax.plot(t, v[:, k], color=c, lw=1.7)[0] for k, c in zip(ks, cs)]
+            style(ax, "time in s", "share", lab)
+            ax.set_xlim(t[0], t[-1] + 0.2 * (t[-1] - t[0])); ax.set_ylim(0, 1)
+            end_labels(ax, t[-1], [v[np.isfinite(v[:, k]), k][-1] if np.isfinite(v[:, k]).any() else np.nan for k in ks], st_lab, cs)
+        legend(fig, hs, st_lab)
+        fig.suptitle("Conversion and selectivity against time    (a curve starts when the species arrive)", fontsize=9.5,
+                     x=0.01, ha="left")
+        save(fig, "plot_conversion_selectivity_time.png")
+
+    # --- along the flow at a few times
+    its = sorted(set(int(round(k)) for k in np.linspace(0, len(t) - 1, min(6, len(t)))))
+    cs = ramp(len(its))
+    panels = [(val[..., i], names[i], "mass fraction") for i in range(len(names))] + [(v, lab, "share") for v, lab in extra]
+    ncol = min(len(panels), 4); nrow = -(-len(panels) // ncol)
+    fig, axs = plt.subplots(nrow, ncol, figsize=(2.75 * ncol + 0.4, 2.3 * nrow + 0.6), squeeze=False, sharex=True,
+                            constrained_layout=True)
+    for j, ax in enumerate(axs.ravel()):
+        if j >= len(panels):
+            ax.set_axis_off(); continue
+        v, lab, unit = panels[j]
+        span(ax)
+        hs = [ax.plot(zmm, v[i], color=c, lw=1.5)[0] for i, c in zip(its, cs)]
+        style(ax, "z in mm" if j + ncol >= len(panels) else None, unit, lab)
+        ax.tick_params(labelbottom=True)
+        ax.set_xlim(zmm[0], zmm[-1]); ax.set_ylim(0, 1 if unit == "share" else None)
+    legend(fig, hs, ["%.2f s" % t[i] for i in its], title="time (light: early, dark: late)")
+    fig.suptitle("Along the flow: averages over the cross-section%s" % note, fontsize=9.5, x=0.01, ha="left")
+    save(fig, "plot_profiles.png")
+
+    # --- maps over position and time
+    edges = lambda c: np.concatenate([[c[0] - 0.5 * (c[1] - c[0])], 0.5 * (c[1:] + c[:-1]), [c[-1] + 0.5 * (c[-1] - c[-2])]])
+    fig, axs = plt.subplots(nrow, ncol, figsize=(2.9 * ncol + 0.4, 2.3 * nrow + 0.6), squeeze=False, sharex=True, sharey=True,
+                            constrained_layout=True)
+    for j, ax in enumerate(axs.ravel()):
+        if j >= len(panels):
+            ax.set_axis_off(); continue
+        v, lab, unit = panels[j]
+        cm = matplotlib.colormaps["viridis"].copy() if hasattr(matplotlib, "colormaps") else plt.get_cmap("viridis").copy()
+        cm.set_bad(PALE)
+        hi = 1.0 if unit == "share" else nice_max(np.nanpercentile(v, 99.9)) if np.isfinite(v).any() else 1.0
+        im = ax.pcolormesh(edges(t), edges(zmm), np.ma.masked_invalid(v).T, cmap=cm, norm=Normalize(0.0, hi), rasterized=True)
+        if a.mark:
+            for zz in a.mark:
+                ax.axhline(zz, color="white", lw=0.9, ls=(0, (4, 3))); ax.axhline(zz, color="black", lw=0.35, ls=(0, (4, 3)))
+        ax.set_title(lab, loc="left", color=INK)
+        ax.tick_params(colors=MUTED, length=2.5, width=0.5, labelsize=7.5, labelbottom=True)
+        for s in ax.spines.values():
+            s.set_linewidth(0.5)
+        if j + ncol >= len(panels): ax.set_xlabel("time in s", color=MUTED)
+        if j % ncol == 0: ax.set_ylabel("z in mm (flow upwards)", color=MUTED)
+        colourbar(fig, im, ax, unit)
+    fig.suptitle("Position against time: averages over the cross-section%s" % (
+        "    (dashed lines: z = %g and %g mm; pale: nothing there yet)" % tuple(a.mark) if a.mark else ""),
+        fontsize=9.5, x=0.01, ha="left")
+    save(fig, "plot_maps_z_time.png")
+
+    # --- the numbers of the curves at the positions
+    path = os.path.join(out, "curves_stations.csv")
+    with open(path, "w") as f:
+        f.write("time_s,z_mm," + ",".join(names) + "".join(",%s" % n for n in ("conversion", "selectivity")[:len(extra)]) + "\n")
+        for k in ks:
+            for i in range(len(t)):
+                row = ["%.6g" % t[i], "%.6g" % zmm[k]] + ["%.6g" % x for x in val[i, k]]
+                row += ["" if not np.isfinite(v[i, k]) else "%.6g" % v[i, k] for v, _ in extra]
+                f.write(",".join(row) + "\n")
+    print("  written %s" % path, flush=True)
+    return len(done)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--case", default=".", help="case folder (default: here)")
@@ -235,6 +500,12 @@ def main():
     p.add_argument("--pixel", type=float, default=0.02, help="pixel size [mm]")
     p.add_argument("--dpi", type=int, default=220)
     p.add_argument("--no-cache", action="store_true", help="do not write cell_centres_f32.npy")
+    p.add_argument("--plots-only", action="store_true", help="only the curves from the tables of the run, no slices")
+    p.add_argument("--no-plots", action="store_true", help="no curves")
+    p.add_argument("--stations", type=float, nargs="*", default=None, help="z positions [mm] of the curves against time")
+    p.add_argument("--feed", default=None, help="feed species of the conversion (default: the first)")
+    p.add_argument("--desired", nargs="*", default=["C", "D"], help="desired products of the selectivity")
+    p.add_argument("--waste", nargs="*", default=["E"], help="unwanted products of the selectivity")
     a = p.parse_args()
 
     out = a.out or os.path.join(a.case, "slices")
@@ -242,6 +513,11 @@ def main():
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 8, "axes.titlesize": 9, "axes.titleweight": "bold",
                          "axes.labelsize": 8, "figure.dpi": 100, "savefig.dpi": a.dpi, "savefig.bbox": "tight",
                          "savefig.pad_inches": 0.06})
+
+    if not a.no_plots:
+        curves(a.case, out, a)
+    if a.plots_only:
+        return
 
     snaps = Snapshots(a.case)
     centres = read_centres(a.case, None if a.no_cache else os.path.join(out, "cell_centres_f32.npy"))
