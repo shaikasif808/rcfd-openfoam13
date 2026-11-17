@@ -39,6 +39,30 @@ EQUATIONS = {
     "eq_implicit_step":
         r"V\,\frac{c^{\mathrm{new}}-c^{\mathrm{old}}}{\Delta t} \;=\; \sum_{\text{faces}} \frac{D\,A_f}{d_f}\,"
         r"\bigl(c^{\mathrm{new}}_{\mathrm{nb}}-c^{\mathrm{new}}\bigr) \;-\; V\,k_{\mathrm{wall}}\,c^{\mathrm{new}} \;+\; S",
+    # note "Layering growth in rCFD: three moment fields instead of size bins"
+    "eq_mom_fields":
+        r"x = \frac{d - d_{\mathrm{ref}}}{d_{\mathrm{ref}}}, \qquad"
+        r" X_k = \langle x^k \rangle = \frac{1}{n}\sum_{p=1}^{n} x_p^{\,k}, \qquad k = 1, 2, 3",
+    "eq_mom_mixing":
+        r"X_k^{\mathrm{new}}(i) = \frac{\sum_j w_{ij}\, X_k^{\mathrm{old}}(j)}{\sum_j w_{ij}}",
+    "eq_mom_classic":
+        r"\frac{\mathrm{d}\mu_k}{\mathrm{d}t} = k\, G\, \mu_{k-1}, \qquad \mu_k = \int_0^\infty d^{\,k}\, n(d)\, \mathrm{d}d",
+    "eq_mom_share":
+        r"\Delta V_i = \Delta V_{\mathrm{nozzle}}\, \frac{w_i\, n_i\, S_{2,i}}{\sum_j w_j\, n_j\, S_{2,j}}, \qquad"
+        r" S_1 = 1 + X_1, \quad S_2 = 1 + 2X_1 + X_2",
+    "eq_mom_step":
+        r"n_i\, \frac{\pi}{6}\, d_{\mathrm{ref}}^{3} \left( 3 D\, S_2 + 3 D^2 S_1 + D^3 \right) = \Delta V_i",
+    "eq_mom_update":
+        r"X_1 \leftarrow X_1 + D, \qquad X_2 \leftarrow X_2 + 2 D X_1 + D^2, \qquad"
+        r" X_3 \leftarrow X_3 + 3 D X_2 + 3 D^2 X_1 + D^3",
+    "eq_mom_mass":
+        r"M = M_{\mathrm{core}} + \rho_{\mathrm{layer}}\, N\, \frac{\pi}{6}"
+        r" \left( \langle d^3 \rangle - \langle d^3 \rangle_{0} \right), \qquad"
+        r" \langle d^3 \rangle = d_{\mathrm{ref}}^{3} \left( 1 + 3X_1 + 3X_2 + X_3 \right)",
+    "eq_mom_bins":
+        r"\sigma_{\mathrm{num}}^{2} \approx \Delta d \cdot L",
+    "eq_mom_correction":
+        r"x \rightarrow a\,x + b: \qquad X_1 \leftarrow aX_1 + b, \quad X_2 \leftarrow a^2 X_2 + 2ab X_1 + b^2",
 }
 
 DPI, WIDTH, MARGIN = 300, 1900, 36            # 1900 px = 16 cm of text at 300 dpi

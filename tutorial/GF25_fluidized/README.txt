@@ -32,3 +32,12 @@ Database: about 12 MB per frame, 25 GB in total.
 Monitors in postProcessing/: solids volume (x 1040 = kg), pressure at the inlet, largest alpha.particles.
 rCFD/rCFD_user_run.h is the package template (density 1040, 2000 frames, 5 ms): put your own model there.
 run_gf25.sbatch: job script of the TUHH cluster (folder in its --chdir line).
+
+Batch granulation (layering) on the same database: rCFD/rCFD_user_run_granulation.h
+  Three moment fields of the particle diameter instead of size bins; the bed mass follows from the
+  fields. Copy it to rCFD/rCFD_user_run.h (keep the mixing header under another name), rcfd_compile run.
+  Settings at its top: seeds, densities of core and layer, spray rate, active nozzles, _growth_acceleration.
+  Output: rCFD_granulation_monitor.out, rCFD_granulation_chambers.out; picture: py/rcfd_granulation_plot.py.
+  Explanation with references: https://claude.ai/artifact/HfDBYMrcsFfC54utS7C8UH
+  Tested on a small fluidised-bed database and for 40 steps on a two-frame GF25 database; a full batch
+  on the recorded GF25 flow has not been run.
