@@ -14,6 +14,10 @@ blank separated, lines starting with # are skipped). Drawn as points.
 run. With this option the added variance is divided by F before spread and span are drawn; the
 uncorrected span is drawn as a thin line.
 
+Printed as well: the variance that growth adds per minute (slope of a straight line through
+sigma^2 against time), for the run and for the samples. This is the number to compare when the
+runs are shorter than the batch.
+
 Needs numpy and matplotlib. Nothing in the case is changed.
 """
 import argparse, os
@@ -75,6 +79,15 @@ def main():
 
     meas = table(a.measured) if a.measured else None
 
+    # variance added per minute: run (without the surplus of the acceleration) and samples
+    rate = np.polyfit(t, sigma_c ** 2, 1)[0] if t[-1] > t[0] else 0.0
+    text = "added variance: run %.3g mm2/min" % rate
+    if meas is not None and meas.shape[1] > 2 and len(meas) > 2:
+        s_meas = meas[:, 2] * meas[:, 1] / 2.563
+        rate_m = np.polyfit(meas[:, 0], s_meas ** 2, 1)[0]
+        text += ", samples %.3g mm2/min (run / samples = %.2f)" % (rate_m, rate / rate_m if rate_m != 0 else float("nan"))
+    print(text)
+
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 8, "axes.titlesize": 9, "axes.titleweight": "bold",
                          "savefig.dpi": 200, "savefig.bbox": "tight"})
     fig, ax = plt.subplots(2, 2, figsize=(9.6, 6.4), constrained_layout=True)
@@ -108,9 +121,9 @@ def main():
     style(ax[1, 1], "process time in min", "number mean diameter in mm", "Chambers along the apparatus")
 
     growth = mean[-1] - mean[0]
-    fig.suptitle("%s    bed %.2f -> %.2f kg, x50 %.3f -> %.3f mm, span %.3f -> %.3f; balance correction restored %.0f %% of the growth"
+    fig.suptitle("%s\nbed %.2f -> %.2f kg, x50 %.3f -> %.3f mm, span %.3f -> %.3f; balance correction restored %.0f %% of the growth; %s"
                  % (os.path.abspath(a.case), mass_f[0], mass_f[-1], x50[0], x50[-1], span[0], span[-1],
-                    100.0 * restored[-1] / growth if growth > 0 else 0.0), fontsize=8.5, x=0.01, ha="left")
+                    100.0 * restored[-1] / growth if growth > 0 else 0.0, text), fontsize=8, x=0.01, ha="left")
     out = a.out or os.path.join(a.case, "rCFD_granulation.png")
     fig.savefig(out); plt.close(fig)
     print("written %s" % out)

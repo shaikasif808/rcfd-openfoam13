@@ -132,6 +132,9 @@
     static double   Clipped_moment_sum = 0.0;
     static int      Granulation_initialized = 0;
     static long     Step_count = 0;
+    static double   Solid_volume_start = 0.0;   /* solid volume of the database at the first step [m3]: fixes the
+                                                   particle number and the core mass. The solid volume of the frames
+                                                   varies a little; the number of particles must not. */
 
     static double layer_density(void)
     {
@@ -332,6 +335,7 @@
         Limited_mass = 0.0;
         Clipped_moment_sum = 0.0;
         Step_count = 0;
+        Solid_volume_start = 0.0;
         Granulation_initialized = 1;
 
         Message0("[user] granulation with three moment fields: seeds %.4f mm +- %.4f mm, core %.0f kg/m3, layer %.0f kg/m3\n",
@@ -442,7 +446,10 @@
         /* particles per solid volume of the database: the particle number is that of the seeds */
         ref_volume = _pi / 6.0 * _d_ref * _d_ref * _d_ref;
 
-        number_per_volume = 1.0 / (ref_volume * cube_mean(Seed_moment[x1], Seed_moment[x2], Seed_moment[x3]));
+        if(Solid_volume_start <= 0.0) Solid_volume_start = solid_volume;
+
+        /* the same number of particles in every frame: N = Solid_volume_start / (volume of a seed) */
+        number_per_volume = Solid_volume_start / (solid_volume * ref_volume * cube_mean(Seed_moment[x1], Seed_moment[x2], Seed_moment[x3]));
 
         /* particle surface in every spray cone, weighted with the spray weight */
         for(i_nozzle = 0; i_nozzle < _number_of_nozzles; i_nozzle++){
@@ -694,8 +701,13 @@
 
         seed_cube = cube_mean(Seed_moment[x1], Seed_moment[x2], Seed_moment[x3]);
 
-        mass_core  = _density_core * sum[0];
-        mass_layer = layer_density() * sum[0] * (cube_mean(G1, G2, G3) - seed_cube) / seed_cube;
+        /* particle number and core mass are those of the first step, not of the current frame */
+        {
+            double v0 = (Solid_volume_start > 0.0) ? Solid_volume_start : sum[0];
+
+            mass_core  = _density_core * v0;
+            mass_layer = layer_density() * v0 * (cube_mean(G1, G2, G3) - seed_cube) / seed_cube;
+        }
 
         t_run     = rcfd_get_time(handle);
         t_process = t_run * _growth_acceleration;
@@ -712,12 +724,12 @@
                                    "span (x90-x10)/x50 (approx.), deposited [kg], not deposited [kg], cells with negative variance, "
                                    "smallest variance of x, variance set to zero so far [m3], "
                                    "mean diameter restored by the correction so far [mm], last correction: a - 1, b, shift of X3, "
-                                   "deposited at the step limit [kg]\n");
+                                   "deposited at the step limit [kg], solid mass of the current frame of the database [kg]\n");
 
-                fprintf(f_out, "%e %e %e %e %e %e %e %e %e %e %e %.0f %e %e %e %e %e %e %e\n", t_process, t_run, mass_core + mass_layer,
+                fprintf(f_out, "%e %e %e %e %e %e %e %e %e %e %e %.0f %e %e %e %e %e %e %e %e\n", t_process, t_run, mass_core + mass_layer,
                         mass_core + Deposited_mass, 1e3 * mean, 1e3 * d30, 1e3 * sigma, 1e3 * x50_3, 2.563 * sigma / x50_3,
                         Deposited_mass, Lost_mass, negative, var_min, Clipped_moment_sum,
-                        1e3 * _d_ref * Correction_shift, Correction_last[0], Correction_last[1], Correction_last[2], Limited_mass);
+                        1e3 * _d_ref * Correction_shift, Correction_last[0], Correction_last[1], Correction_last[2], Limited_mass, _density_core * sum[0]);
 
                 fclose(f_out);
             }
