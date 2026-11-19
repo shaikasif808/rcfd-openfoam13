@@ -38,6 +38,10 @@ int    rcfd_patch_faces(void *handle, const char *patch, const int **cells, cons
 int    rcfd_face_distance(void *handle, const double **distance)           { (void)handle; if(distance) *distance = NULL; return -1; }
 int    rcfd_update_corona(void *handle, int i_phase)                       { (void)handle; (void)i_phase; return -1; }
 int    rcfd_update_corona_field(void *handle, double *field)               { (void)handle; (void)field; return -1; }
+const char   *rcfd_init_folder(void)                                       { return NULL; }
+const double *rcfd_init_vof(void *handle, int i_phase)                     { (void)handle; (void)i_phase; return NULL; }
+double rcfd_init_time(void)                                                { return 0.0; }
+void   rcfd_request_stop(void *handle)                                     { (void)handle; }
 
 #else
 
@@ -48,6 +52,10 @@ int    rcfd_run_patch_faces(void *handle, const char *patch, const int **cells, 
 int    rcfd_run_face_distance(void *handle, const double **distance);
 int    rcfd_run_update_corona(void *handle, int i_phase);
 int    rcfd_run_update_corona_field(void *handle, double *field);
+const char   *rcfd_run_init_folder(void);
+const double *rcfd_run_init_vof(void *handle, int i_phase);
+double rcfd_run_init_time(void);
+void   rcfd_run_request_stop(void *handle);
 
 int    rcfd_foam_register(void *handle, const char *name, void (*f)(void)) { return rcfd_run_register_user_function(handle, name, f); }
 void   fluent_set_cell_dict(void *handle, const short i_layer)             { (void)handle; (void)i_layer; }   /* counts are read from data/topo */
@@ -60,6 +68,10 @@ int    rcfd_patch_faces(void *handle, const char *patch, const int **cells, cons
 int    rcfd_face_distance(void *handle, const double **distance)           { return rcfd_run_face_distance(handle, distance); }
 int    rcfd_update_corona(void *handle, int i_phase)                       { return rcfd_run_update_corona(handle, i_phase); }
 int    rcfd_update_corona_field(void *handle, double *field)               { return rcfd_run_update_corona_field(handle, field); }
+const char   *rcfd_init_folder(void)                                       { return rcfd_run_init_folder(); }
+const double *rcfd_init_vof(void *handle, int i_phase)                     { return rcfd_run_init_vof(handle, i_phase); }
+double rcfd_init_time(void)                                                { return rcfd_run_init_time(); }
+void   rcfd_request_stop(void *handle)                                     { rcfd_run_request_stop(handle); }
 
 #endif
 

@@ -41,3 +41,12 @@ Batch granulation (layering) on the same database: rCFD/rCFD_user_run_granulatio
   Explanation with references: https://claude.ai/artifact/HfDBYMrcsFfC54utS7C8UH
   Tested on a small fluidised-bed database and for 40 steps on a two-frame GF25 database; a full batch
   on the recorded GF25 flow has not been run.
+
+Batch in stages on several databases (bed mass grows beyond what one recorded flow stands for): run_gf25_batch.sbatch
+  Databases of the same mesh at 15, 20, 25, ... kg (copy constant/polyMesh, do not mesh again).
+  Batch folder with two files: rCFD_user_run.h (copy of rCFD/rCFD_user_run_granulation.h with your settings)
+  and stages.txt (per line: case folder of a database, bed mass at which its stage ends in kg; the last
+  value is the bed mass at the end of the batch). The job makes stage_1, stage_2, ... there, each with
+  links to data/ and constant/ of its database, and writes rCFD_granulation.png for the whole batch.
+  Needs package r6 (rcfd_run -init). Every stage must end within one job; with _growth_acceleration 10
+  a batch of two hours needs about 8 hours on 32 processes.

@@ -569,20 +569,216 @@ static void run_write_snapshot(void *h, int step, double time)
 }
 
 /* ------------------------------------------------------------------------- */
+/* state of a run, to continue on another database of the same mesh           */
+/* ------------------------------------------------------------------------- */
+
+/* out/state_final.bin, written at the end of every run:
+     char[8] "RCFDSTAT", int32 version (1), int64 n_cells, int32 n_phases, n_phases x int32 n_data, float64 time,
+     then per phase: float64 vof[n_cells], n_data x float64 data[n_cells]; all arrays in global cell numbering.
+   -init DIR reads DIR/out/state_final.bin: the data of every cell are set to those of the same cell
+   (same mesh, any decomposition). The volume fractions of the file are not put into the library (they
+   belong to the other database); the user header gets them with rcfd_init_vof(). */
+
+static const char *g_init_dir = NULL;
+static int        g_stop_requested = 0;
+static double     *g_init_vof[RUN_MAX_PHASES];
+static double     g_init_time = 0.0;
+
+const char *rcfd_run_init_folder(void) { return g_init_dir; }
+
+void rcfd_run_request_stop(void *handle) { (void)handle; g_stop_requested = 1; }
+
+const double *rcfd_run_init_vof(void *handle, int i_phase)
+{
+    (void)handle;
+
+    if(g_init_dir == NULL || i_phase < 0 || i_phase >= g_n_phases) return NULL;
+
+    return g_init_vof[i_phase];
+}
+
+double rcfd_run_init_time(void) { return g_init_time; }
+
+static void run_state_gather_write(FILE *f, const char *name, const double *local, double *all, double *field)
+{
+    size_t n = (size_t)of_n_cells_global;
+    int    i;
+
+    MPI_Gatherv((void*)local, of_topo.n_int, MPI_DOUBLE, all, g_counts, g_displs, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    if(of_rank == 0){
+
+        for(i = 0; i < of_n_cells_global; i++) field[g_gid_all[i]] = all[i];
+
+        if(of_fwrite_le(field, sizeof(double), n, f) != n) of_abort("write error on '%s'", name);
+    }
+}
+
+static void run_write_state(void *h, double time)
+{
+    int     i, p, d, n_int = of_topo.n_int, i_frame = rcfd_get_current_frame(h);
+    double  **vof = rcfd_get_cell_vof(h, 0, i_frame);
+    double  *local, *all = NULL, *field = NULL;
+    const char *name = "out/state_final.bin", *tmp = "out/state_final.bin.tmp";
+    FILE    *f = NULL;
+
+    local = (double*)of_malloc((size_t)(n_int > 0 ? n_int : 1) * sizeof(double), "state buffer");
+
+    if(of_rank == 0){
+
+        char    magic[8] = {'R','C','F','D','S','T','A','T'};
+        int32_t version = 1, np = g_n_phases, nd;
+        int64_t n64 = of_n_cells_global;
+        double  t = time;
+
+        all   = (double*)of_malloc((size_t)of_n_cells_global * sizeof(double), "state gather");
+        field = (double*)of_malloc((size_t)of_n_cells_global * sizeof(double), "state field");
+
+        f = fopen(tmp, "wb");
+
+        if(f == NULL) of_abort("cannot write '%s': %s", tmp, strerror(errno));
+
+        if(fwrite(magic, 1, 8, f) != 8 || of_fwrite_le(&version, sizeof(int32_t), 1, f) != 1 || of_fwrite_le(&n64, sizeof(int64_t), 1, f) != 1
+           || of_fwrite_le(&np, sizeof(int32_t), 1, f) != 1) of_abort("write error on '%s'", tmp);
+
+        for(p = 0; p < g_n_phases; p++){ nd = g_n_data[p]; if(of_fwrite_le(&nd, sizeof(int32_t), 1, f) != 1) of_abort("write error on '%s'", tmp); }
+
+        if(of_fwrite_le(&t, sizeof(double), 1, f) != 1) of_abort("write error on '%s'", tmp);
+    }
+
+    for(p = 0; p < g_n_phases; p++){
+
+        double **data = rcfd_get_cell_data(h, 0, p);
+
+        for(i = 0; i < n_int; i++) local[i] = vof ? vof[i][p] : 1.0;
+
+        run_state_gather_write(f, tmp, local, all, field);
+
+        for(d = 0; d < g_n_data[p]; d++){
+
+            for(i = 0; i < n_int; i++) local[i] = data[i][d];
+
+            run_state_gather_write(f, tmp, local, all, field);
+        }
+    }
+
+    if(of_rank == 0){
+
+        if(fclose(f) != 0) of_abort("write error on '%s'", tmp);
+
+        if(rename(tmp, name) != 0) of_abort("cannot rename '%s' to '%s': %s", tmp, name, strerror(errno));
+
+        free(all); free(field);
+    }
+
+    free(local);
+}
+
+/* rank 0 reads one array in global numbering, every rank receives the values of its cells */
+static void run_state_read_scatter(FILE *f, const char *name, double *local, double *all, double *field)
+{
+    size_t n = (size_t)of_n_cells_global;
+    int    i;
+
+    if(of_rank == 0){
+
+        if(of_fread_le(field, sizeof(double), n, f) != n) of_abort("'%s' ends too early", name);
+
+        for(i = 0; i < of_n_cells_global; i++) all[i] = field[g_gid_all[i]];
+    }
+
+    MPI_Scatterv(all, g_counts, g_displs, MPI_DOUBLE, local, of_topo.n_int, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+}
+
+static void run_read_state(void *h)
+{
+    int     i, p, d, n_int = of_topo.n_int;
+    double  *local, *all = NULL, *field = NULL;
+    char    name[1024];
+    FILE    *f = NULL;
+
+    snprintf(name, sizeof(name), "%s/out/state_final.bin", g_init_dir);
+
+
+    if(of_rank == 0){
+
+        char    magic[8];
+        int32_t version = 0, np = 0, nd = 0;
+        int64_t n64 = 0;
+
+        f = fopen(name, "rb");
+
+        if(f == NULL) of_abort("-init: cannot open '%s': %s (a run writes it when it ends)", name, strerror(errno));
+
+        if(fread(magic, 1, 8, f) != 8 || memcmp(magic, "RCFDSTAT", 8) != 0) of_abort("'%s' is not a state file of rcfd_run", name);
+
+        if(of_fread_le(&version, sizeof(int32_t), 1, f) != 1 || of_fread_le(&n64, sizeof(int64_t), 1, f) != 1 || of_fread_le(&np, sizeof(int32_t), 1, f) != 1)
+            of_abort("'%s' ends too early", name);
+
+        if(version != 1) of_abort("'%s': version %d is not known to this rcfd_run", name, (int)version);
+
+        if(n64 != (int64_t)of_n_cells_global)
+            of_abort("'%s' holds %lld cells, this database %d: the two databases must be recorded on the same mesh", name, (long long)n64, of_n_cells_global);
+
+        if(np != g_n_phases) of_abort("'%s' holds %d phases, rCFD_user_run.h %d", name, (int)np, g_n_phases);
+
+        for(p = 0; p < g_n_phases; p++){
+
+            if(of_fread_le(&nd, sizeof(int32_t), 1, f) != 1) of_abort("'%s' ends too early", name);
+
+            if(nd != g_n_data[p]) of_abort("'%s' holds %d data of phase %d, rCFD_user_run.h %d: both runs need the same data", name, (int)nd, p, g_n_data[p]);
+        }
+
+        if(of_fread_le(&g_init_time, sizeof(double), 1, f) != 1) of_abort("'%s' ends too early", name);
+
+        all   = (double*)of_malloc((size_t)of_n_cells_global * sizeof(double), "state scatter");
+        field = (double*)of_malloc((size_t)of_n_cells_global * sizeof(double), "state field");
+    }
+
+    MPI_Bcast(&g_init_time, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    local = (double*)of_malloc((size_t)(n_int > 0 ? n_int : 1) * sizeof(double), "state buffer");
+
+    for(p = 0; p < g_n_phases; p++){
+
+        double **data = rcfd_get_cell_data(h, 0, p);
+
+        g_init_vof[p] = (double*)of_malloc((size_t)(n_int > 0 ? n_int : 1) * sizeof(double), "volume fractions of the earlier run");
+
+        run_state_read_scatter(f, name, g_init_vof[p], all, field);
+
+        for(d = 0; d < g_n_data[p]; d++){
+
+            run_state_read_scatter(f, name, local, all, field);
+
+            for(i = 0; i < n_int; i++) data[i][d] = local[i];
+        }
+    }
+
+    if(of_rank == 0){ fclose(f); free(all); free(field); }
+
+    free(local);
+
+    of_msg("-init: data of all cells taken from '%s' (end of that run: t = %g s)", name, g_init_time);
+}
+
+/* ------------------------------------------------------------------------- */
 
 static void run_usage(void)
 {
     if(of_rank == 0)
-        fprintf(stderr, "usage: mpirun -np N rCFD/rcfd_run [-steps N] [-snap K] [-case DIR]\n"
-                        "       -steps N   number of rCFD time steps [100]\n"
+        fprintf(stderr, "usage: mpirun -np N rCFD/rcfd_run [-steps N] [-snap K] [-case DIR] [-init DIR2]\n"
+                        "       -steps N   number of rCFD time steps [100]; the user header can end the run earlier (rcfd_request_stop)\n"
                         "       -snap K    snapshot every K steps [10]; 0: first and last only\n"
-                        "       -case DIR  case directory [current directory]\n");
+                        "       -case DIR  case directory [current directory]\n"
+                        "       -init DIR2 start from the end of the run in DIR2 (its out/state_final.bin): another database\n"
+                        "                  on the same mesh, same phases and data. DIR2 is taken from the case directory.\n");
 }
 
 int main(int argc, char **argv)
 {
     void    *h = NULL;
-    int     i, p, step, n_steps = 100, snap_every = 10, last_snap = -1;
+    int     i, p, step, n_steps = 100, snap_every = 10, last_snap = -1, n_done = 0;
     int     db_frames = 0, db_partitions = 0, n_frames, prep_phases = -1, prep_frames = -1;
     int     missing = 0, g_missing = 0;
     double  dt, prep_dt = -1.0, t_start, t_run;
@@ -594,7 +790,7 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &of_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &of_size);
 
-    (void)of_fread_le; (void)of_read_frames_meta; (void)of_read_cfg; (void)of_startup; (void)of_register_topology;
+    (void)of_read_frames_meta; (void)of_read_cfg; (void)of_startup; (void)of_register_topology;
     (void)of_user_set_node_dict; (void)of_user_init_cells; (void)of_user_init_faces; (void)of_user_init_cell_hosts; (void)of_user_init_nodes;
     (void)of_user_set_cell_dict; (void)of_user_set_face_dict;
 
@@ -603,6 +799,7 @@ int main(int argc, char **argv)
         if(strcmp(argv[i], "-steps") == 0 && i + 1 < argc)      n_steps = atoi(argv[++i]);
         else if(strcmp(argv[i], "-snap") == 0 && i + 1 < argc)  snap_every = atoi(argv[++i]);
         else if(strcmp(argv[i], "-case") == 0 && i + 1 < argc)  case_dir = argv[++i];
+        else if(strcmp(argv[i], "-init") == 0 && i + 1 < argc)  g_init_dir = argv[++i];
         else{ run_usage(); MPI_Finalize(); return 1; }
     }
 
@@ -764,6 +961,8 @@ int main(int argc, char **argv)
 
     run_output_init();
 
+    if(g_init_dir) run_read_state(h);
+
     run_write_snapshot(h, 0, 0.0);
     last_snap = 0;
 
@@ -771,7 +970,14 @@ int main(int argc, char **argv)
 
     for(step = 1; step <= n_steps; step++){
 
+        int stop = 0;
+
         rcfd_run(h);
+
+        n_done = step;
+
+        /* the user header asked for the end of the run (rcfd_request_stop) */
+        MPI_Allreduce(&g_stop_requested, &stop, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
         if(snap_every > 0 && (step % snap_every) == 0){
 
@@ -780,14 +986,22 @@ int main(int argc, char **argv)
 
             of_msg("step %d of %d, t = %g s", step, n_steps, step * dt);
         }
+
+        if(stop){
+
+            of_msg("the user header ended the run after step %d of %d", step, n_steps);
+            break;
+        }
     }
 
-    if(last_snap != n_steps) run_write_snapshot(h, n_steps, n_steps * dt);
+    if(last_snap != n_done) run_write_snapshot(h, n_done, n_done * dt);
+
+    run_write_state(h, g_init_time + n_done * dt);
 
     t_run = MPI_Wtime() - t_run;
 
-    of_msg("run finished: %d steps, t = %g s, %d fields per snapshot (out/fields.txt); run time %.2f s (%.4f s per step), total %.2f s; peak resident memory per rank: max %.0f MB, sum %.0f MB",
-           n_steps, n_steps * dt, run_field_count(), t_run, (n_steps > 0) ? t_run / n_steps : 0.0, MPI_Wtime() - t_start, of_peak_memory_mb(0), of_peak_memory_mb(1));
+    of_msg("run finished: %d steps, t = %g s, %d fields per snapshot (out/fields.txt), state in out/state_final.bin; run time %.2f s (%.4f s per step), total %.2f s; peak resident memory per rank: max %.0f MB, sum %.0f MB",
+           n_done, n_done * dt, run_field_count(), t_run, (n_done > 0) ? t_run / n_done : 0.0, MPI_Wtime() - t_start, of_peak_memory_mb(0), of_peak_memory_mb(1));
 
     rcfd_close(h);
 

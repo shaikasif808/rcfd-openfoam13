@@ -42,6 +42,18 @@
    constant; the bed mass follows from the fields:
        M = M_core + rho_layer * N * pi/6 * ( <d^3> - <d^3>_start )
 
+   SEVERAL DATABASES (bed mass grows beyond what one recorded flow can stand for)
+   The batch is run in stages, each on a database recorded at its own bed mass, on the same mesh:
+       stage 1:   mpirun -np N rCFD/rcfd_run -steps ... -snap ...                 (in the folder of stage 1)
+       stage 2:   mpirun -np N rCFD/rcfd_run -steps ... -snap ... -init <folder of stage 1>
+   A stage ends when the bed mass reaches the value in the file rCFD/stage_mass_limit.txt of its folder
+   (one number in kg; no file: the run ends with -steps). The next stage takes the three fields of every
+   cell from the same cell of the stage before, and the totals from its rCFD_granulation_state.txt. Cells
+   that held no solid before get the mean over all particles. The joint correction of the first step then
+   puts mean, variance and particle volume back on their targets: bed mass and size distribution pass the
+   switch unchanged. The particle number comes from _bed_mass_start and the seeds, not from a database.
+   The job script run_gf25_batch.sbatch does all of this.
+
    NOT IN THIS HEADER: discharge and recycle (continuous mode), size segregation (drift),
    agglomeration, breakage, nucleation. The distribution must stay narrow and unimodal.
 
@@ -66,7 +78,9 @@
 #define _density_gas            1.2
 
     /* particles */
-#define _density_core           1040.0      /* seed particles (gamma alumina) [kg/m3]; the solid of the database */
+#define _bed_mass_start         15.0        /* seed particles in the plant at the start [kg]; with the seed size it
+                                               fixes the particle number for all stages */
+#define _density_core           1040.0      /* seed particles (gamma alumina) [kg/m3] */
 #define _density_layer          1440.0      /* dry layer material (sodium benzoate) [kg/m3] */
 #define _layer_porosity         0.0         /* pore share of the layer; layer volume = mass / (density (1 - porosity)) */
 
@@ -90,7 +104,9 @@
     static const double Nozzle_axis[3] = {0.0, 1.0, 0.0};                 /* upwards */
 
 #define _spray_half_angle_deg   20.0
-#define _spray_height           0.1725      /* length of the spray cone [m] */
+#define _spray_height           0.05        /* length of the spray cone [m]; 0.1725 in the old spray header. 0.05 and
+                                               _face_swap_diffusion 0.0 gave the measured rate of broadening of the
+                                               30 kg/h batch on the 15 kg database (provisional calibration) */
 #define _nozzle_orifice_radius  0.005
 #define _atomization_pressure   2.0         /* [bar] */
 #define _alpha_0                0.55        /* width of the Gaussian: sigma = alpha_0 / (1 + alpha_beta p) * cone radius */
@@ -101,7 +117,7 @@
 #define _spray_w_threshold      1.0e-4      /* cells below this weight are outside the cones */
 
     /* numerics */
-#define _face_swap_diffusion    0.1         /* as in the mixing header */
+#define _face_swap_diffusion    0.0         /* 0.1 (mixing header) hides nine tenths of the broadening */
 #define _max_diameter_step      2.0e-6      /* limit of the diameter step of a cell per rCFD step [m]. What a cell
                                                cannot take goes to the other cells of the same cone; only if all of
                                                them are at the limit it is counted as not deposited (monitor) */
@@ -132,9 +148,21 @@
     static double   Clipped_moment_sum = 0.0;
     static int      Granulation_initialized = 0;
     static long     Step_count = 0;
-    static double   Solid_volume_start = 0.0;   /* solid volume of the database at the first step [m3]: fixes the
-                                                   particle number and the core mass. The solid volume of the frames
-                                                   varies a little; the number of particles must not. */
+    static double   Stage_limit = 0.0;      /* bed mass at which this run ends [kg]; 0: no limit */
+    static double   Time_offset = 0.0;      /* process time at the start of this run [s] (end of the stage before) */
+    static int      Hand_over_pending = 0;  /* started with -init: cells without solid in the stage before are still to be set */
+    static int      Stop_now = 0;
+
+#define _vof_handover_min       1.0e-3      /* below this solid fraction a cell of the stage before counts as empty */
+#define _state_file             "rCFD_granulation_state.txt"
+
+    /* particle number of the batch */
+    static double particle_number(void)
+    {
+        double d3 = _d_ref * _d_ref * _d_ref * (1.0 + 3.0 * Seed_moment[0] + 3.0 * Seed_moment[1] + Seed_moment[2]);
+
+        return _bed_mass_start / (_density_core * _pi / 6.0 * d3);
+    }
 
     static double layer_density(void)
     {
@@ -335,7 +363,65 @@
         Limited_mass = 0.0;
         Clipped_moment_sum = 0.0;
         Step_count = 0;
-        Solid_volume_start = 0.0;
+        Stage_limit = 0.0;
+        Time_offset = 0.0;
+        Hand_over_pending = 0;
+        Stop_now = 0;
+
+        /* end of this stage */
+        {
+            FILE *f = fopen("rCFD/stage_mass_limit.txt", "r");
+
+            if(f){ if(fscanf(f, "%lf", &Stage_limit) != 1) Stage_limit = 0.0; fclose(f); }
+        }
+
+        /* totals of the stage before */
+        if(rcfd_init_folder()){
+
+            char name[1200], key[64];
+            double v;
+            int    n_read = 0;
+            FILE   *f;
+
+            snprintf(name, sizeof(name), "%s/%s", rcfd_init_folder(), _state_file);
+
+            f = fopen(name, "r");
+
+            if(f){
+
+                while(fscanf(f, "%63s %lf", key, &v) == 2){
+
+                    n_read++;
+
+                    if     (strcmp(key, "process_time_s") == 0)   Time_offset = v;
+                    else if(strcmp(key, "target_x1") == 0)        Target[x1] = v;
+                    else if(strcmp(key, "target_x2") == 0)        Target[x2] = v;
+                    else if(strcmp(key, "target_x3") == 0)        Target[x3] = v;
+                    else if(strcmp(key, "deposited_kg") == 0)     Deposited_mass = v;
+                    else if(strcmp(key, "lost_kg") == 0)          Lost_mass = v;
+                    else if(strcmp(key, "limited_kg") == 0)       Limited_mass = v;
+                    else if(strcmp(key, "correction_shift") == 0) Correction_shift = v;
+                    else if(strcmp(key, "clipped") == 0)          Clipped_moment_sum = v;
+                    else n_read--;
+                }
+
+                fclose(f);
+            }
+
+            if(n_read < 9){
+
+                Message0("[user] ERROR: '%s' is missing or incomplete (%d of 9 values): the totals of the stage before are not known\n", name, n_read);
+
+                rcfd_request_stop(handle);
+            }
+
+            Hand_over_pending = 1;
+
+            Message0("[user] continued from '%s': process time %.1f s, bed mass %.4f kg\n", rcfd_init_folder(), Time_offset, _bed_mass_start + Deposited_mass);
+        }
+
+        if(Stage_limit > 0.0) Message0("[user] this stage ends at a bed mass of %.3f kg\n", Stage_limit);
+
         Granulation_initialized = 1;
 
         Message0("[user] granulation with three moment fields: seeds %.4f mm +- %.4f mm, core %.0f kg/m3, layer %.0f kg/m3\n",
@@ -392,6 +478,38 @@
 
         loop_data{ source[i_data] = 0.0; G[i_data] = 0.0; }
 
+        /* first step after a switch of the database: cells that held no solid in the stage before carry no
+           information; they get the mean over all particles (the bed is well mixed). The correction below
+           then restores the totals. */
+        if(Hand_over_pending){
+
+            const double *vof_before = rcfd_init_vof(handle, solid);
+            double n_set = 0.0, v_set = 0.0, v_all = 0.0;
+
+            if(vof_before){
+
+                for(i_cell = 0; i_cell < int_cell_count; i_cell++){
+
+                    double cv = cell_volume[i_cell] * vof[i_cell][solid];
+
+                    v_all += cv;
+
+                    if(vof_before[i_cell] > _vof_handover_min) continue;
+
+                    loop_data{ data[i_cell][i_data] = Target[i_data]; }
+
+                    if(vof[i_cell][solid] > vof_cutoff){ n_set += 1.0; v_set += cv; }
+                }
+
+                n_set = PRF_GRSUM1(n_set); v_set = PRF_GRSUM1(v_set); v_all = PRF_GRSUM1(v_all);
+
+                Message0("[user] switch of the database: %.0f cells with solid were empty before (%.2f %% of the solid volume); they start with the mean over all particles\n",
+                         n_set, (v_all > 0.0) ? 100.0 * v_set / v_all : 0.0);
+            }
+
+            Hand_over_pending = 0;
+        }
+
         /* means over all particles as the transport left them */
         for(i_cell = 0; i_cell < int_cell_count; i_cell++){
 
@@ -446,10 +564,9 @@
         /* particles per solid volume of the database: the particle number is that of the seeds */
         ref_volume = _pi / 6.0 * _d_ref * _d_ref * _d_ref;
 
-        if(Solid_volume_start <= 0.0) Solid_volume_start = solid_volume;
-
-        /* the same number of particles in every frame: N = Solid_volume_start / (volume of a seed) */
-        number_per_volume = Solid_volume_start / (solid_volume * ref_volume * cube_mean(Seed_moment[x1], Seed_moment[x2], Seed_moment[x3]));
+        /* the same number of particles in every frame and in every database: the solid field only says
+           where they are */
+        number_per_volume = particle_number() / solid_volume;
 
         /* particle surface in every spray cone, weighted with the spray weight */
         for(i_nozzle = 0; i_nozzle < _number_of_nozzles; i_nozzle++){
@@ -598,6 +715,15 @@
         Limited_mass   += PRF_GRSUM1(volume_limited) * layer_density();
 
         Step_count++;
+
+        if(Stage_limit > 0.0 && _bed_mass_start + Deposited_mass >= Stage_limit && !Stop_now){
+
+            Stop_now = 1;
+
+            Message0("[user] bed mass %.4f kg has reached the limit of this stage (%.3f kg): the run ends\n", _bed_mass_start + Deposited_mass, Stage_limit);
+
+            rcfd_request_stop(handle);
+        }
 #endif
     }
 
@@ -650,7 +776,28 @@
             if(f_spray) f_spray[i_cell] = Spray_w[i_cell];
         }
 
-        if(Step_count % _monitor_interval != 0) return;
+        /* started with -init: before the first step the fields of the stage before are not in place yet */
+        if(rcfd_init_folder() && Step_count == 0) return;
+
+        /* totals for a later stage: always those of the last finished step */
+        if(myid == 0){
+
+            FILE *f_state = fopen(_state_file ".tmp", "w");
+
+            if(f_state){
+
+                fprintf(f_state, "process_time_s %.17g\ntarget_x1 %.17g\ntarget_x2 %.17g\ntarget_x3 %.17g\ndeposited_kg %.17g\nlost_kg %.17g\n"
+                                 "limited_kg %.17g\ncorrection_shift %.17g\nclipped %.17g\n",
+                        Time_offset + rcfd_get_time(handle) * _growth_acceleration, Target[x1], Target[x2], Target[x3], Deposited_mass, Lost_mass,
+                        Limited_mass, Correction_shift, Clipped_moment_sum);
+
+                fclose(f_state);
+
+                rename(_state_file ".tmp", _state_file);
+            }
+        }
+
+        if(Step_count % _monitor_interval != 0 && !Stop_now) return;
 
         for(k = 0; k < 4 + 4 * _number_of_chambers; k++) sum[k] = 0.0;
 
@@ -701,16 +848,12 @@
 
         seed_cube = cube_mean(Seed_moment[x1], Seed_moment[x2], Seed_moment[x3]);
 
-        /* particle number and core mass are those of the first step, not of the current frame */
-        {
-            double v0 = (Solid_volume_start > 0.0) ? Solid_volume_start : sum[0];
-
-            mass_core  = _density_core * v0;
-            mass_layer = layer_density() * v0 * (cube_mean(G1, G2, G3) - seed_cube) / seed_cube;
-        }
+        /* particle number and core mass are those of the batch, not of the database */
+        mass_core  = _bed_mass_start;
+        mass_layer = layer_density() * (_bed_mass_start / _density_core) * (cube_mean(G1, G2, G3) - seed_cube) / seed_cube;
 
         t_run     = rcfd_get_time(handle);
-        t_process = t_run * _growth_acceleration;
+        t_process = Time_offset + t_run * _growth_acceleration;
 
         if(myid == 0){
 

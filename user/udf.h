@@ -109,6 +109,20 @@ int rcfd_update_corona(void *handle, int i_phase);
  * implicit diffusion step needs the search direction in the neighbour cells). Returns 0. */
 int rcfd_update_corona_field(void *handle, double *field);
 
+/* Runs in stages on several databases of the same mesh (run mode).
+ *   mpirun -np N rCFD/rcfd_run ... -init DIR   starts with the data of every cell as they were at the end
+ *   of the run in DIR (its out/state_final.bin, written at the end of every run).
+ * rcfd_init_folder(): DIR, or NULL in a run without -init (available from user_init_data on).
+ * rcfd_init_vof(handle, i_phase): volume fraction of the phase in every cell of this processor at the
+ *   end of the run in DIR (the other database), NULL without -init; available from the first step on.
+ *   A cell that was empty there holds data without meaning: the header has to set them.
+ * rcfd_init_time(): time at the end of the run in DIR [s], 0 without -init.
+ * rcfd_request_stop(handle): the run ends after the current step (call it on every processor or on one). */
+const char   *rcfd_init_folder(void);
+const double *rcfd_init_vof(void *handle, int i_phase);
+double rcfd_init_time(void);
+void   rcfd_request_stop(void *handle);
+
 #ifdef __cplusplus
 }
 #endif

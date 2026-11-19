@@ -1242,6 +1242,18 @@ Not tested in r4: periodic sides with more than one phase, the aerated stirred t
 
 Implicit step in the small lattice, frames of 20 ms, E at the outlet after 4 s: 0.457, 0.462, 0.466, 0.467 with 1, 2, 4, 8 sub-steps per step; 0.470 with the explicit sub-steps; 0.4765 in the reference. The step is first order in time.
 
+### Release r6
+
+| Change | File | Reason |
+| --- | --- | --- |
+| A run can start from the end of another run on a different database of the same mesh: `rcfd_run ... -init <folder>` takes the data of every cell from the same cell (global cell number). Every run writes `out/state_final.bin` (float64) at its end. | `src/rcfd_run_main.c` | A process that changes the flow slowly (a bed that grows in a batch) is replayed in stages, each on the database recorded for its state. |
+| The user header can end a run (`rcfd_request_stop`) and read where it started from (`rcfd_init_folder`, `rcfd_init_vof`, `rcfd_init_time`). | `user/udf.h`, `user/rcfd_user_wrap.c` | The header decides when a stage ends and treats cells that held nothing in the stage before. |
+| Batch granulation in stages for the GF25 case: header with three moment fields, job script, plot script. | `tutorial/GF25_fluidized/rCFD/rCFD_user_run_granulation.h`, `tutorial/GF25_fluidized/run_gf25_batch.sbatch`, `py/rcfd_granulation_plot.py` | Bed mass that grows from 15 kg to 31 or 40 kg. |
+
+Tested on two small fluidised-bed databases of one mesh (6180 cells): a run in three stages keeps bed mass, mean and spread across the switches; six switches back and forth without spray leave mean and spread unchanged to 0.000001 mm. Not tested: the GF25 databases of the cluster.
+
+How to run a batch in stages: `tutorial/GF25_fluidized/README.txt`. The model is explained in the note "Layering growth in rCFD: three moment fields instead of size bins" (https://claude.ai/artifact/HfDBYMrcsFfC54utS7C8UH).
+
 ### What this means for existing work
 
 - With a label Courant number of 1 or less, r3 uses the same code path as r2 and records the same database. Above 1 it now takes sub-steps, so a fluidised-bed database recorded with r3 can differ slightly from one recorded with r2. The log line `label Courant number up to ...` of each frame shows which case applies.

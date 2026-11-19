@@ -4,6 +4,7 @@
     python3 rcfd_granulation_plot.py                         # in the case folder
     python3 rcfd_granulation_plot.py --measured samples.csv  # with plant samples
     python3 rcfd_granulation_plot.py --acceleration 10       # run made with _growth_acceleration 10
+    python3 rcfd_granulation_plot.py --case stage_1 stage_2 stage_3      # a batch in stages, in this order
 
 Reads rCFD_granulation_monitor.out and rCFD_granulation_chambers.out, writes rCFD_granulation.png.
 
@@ -57,13 +58,16 @@ def style(ax, xlabel, ylabel, title):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--case", default=".", help="case folder (default: here)")
+    p.add_argument("--case", default=["."], nargs="+", help="case folder (default: here); several: the stages of a batch, in order")
     p.add_argument("--measured", default=None, help="plant samples: time [min], x50 [mm], span")
     p.add_argument("--acceleration", type=float, default=1.0, help="_growth_acceleration of the run")
     p.add_argument("--out", default=None)
     a = p.parse_args()
 
-    m = table(os.path.join(a.case, "rCFD_granulation_monitor.out"))
+    parts = [table(os.path.join(c, "rCFD_granulation_monitor.out")) for c in a.case]
+    width = min(q.shape[1] for q in parts)
+    m = np.vstack([q[:, :width] for q in parts])
+    switches = [q[0, 0] / 60.0 for q in parts[1:]]              # process time at which a new database starts
     if len(m) < 2:
         raise SystemExit("rCFD_granulation_monitor.out holds fewer than two lines")
     t = m[:, 0] / 60.0
@@ -112,19 +116,24 @@ def main():
     style(ax[1, 0], "process time in min", "bed mass in kg", "Bed mass")
     ax[1, 0].legend(frameon=False, fontsize=7.5)
 
-    cpath = os.path.join(a.case, "rCFD_granulation_chambers.out")
-    if os.path.isfile(cpath):
-        c = table(cpath); n = (c.shape[1] - 1) // 3
+    cparts = [table(os.path.join(c, "rCFD_granulation_chambers.out")) for c in a.case
+              if os.path.isfile(os.path.join(c, "rCFD_granulation_chambers.out"))]
+    if cparts:
+        c = np.vstack(cparts); n = (c.shape[1] - 1) // 3
         for k in range(n):
             ax[1, 1].plot(c[:, 0] / 60.0, c[:, 2 + 3 * k], color=SERIES[k % len(SERIES)], lw=1.4, label="chamber %d" % k)
         ax[1, 1].legend(frameon=False, fontsize=7.5, ncol=2)
     style(ax[1, 1], "process time in min", "number mean diameter in mm", "Chambers along the apparatus")
 
+    for axis in ax.ravel():                                      # switches of the database
+        for ts in switches:
+            axis.axvline(ts, color="#b5b4ae", lw=0.7, ls=(0, (2, 2)), zorder=0)
+
     growth = mean[-1] - mean[0]
     fig.suptitle("%s\nbed %.2f -> %.2f kg, x50 %.3f -> %.3f mm, span %.3f -> %.3f; balance correction restored %.0f %% of the growth; %s"
-                 % (os.path.abspath(a.case), mass_f[0], mass_f[-1], x50[0], x50[-1], span[0], span[-1],
+                 % (os.path.abspath(a.case[0]) + (" and %d more stages (dotted lines: switch of the database)" % (len(a.case) - 1) if len(a.case) > 1 else ""), mass_f[0], mass_f[-1], x50[0], x50[-1], span[0], span[-1],
                     100.0 * restored[-1] / growth if growth > 0 else 0.0, text), fontsize=8, x=0.01, ha="left")
-    out = a.out or os.path.join(a.case, "rCFD_granulation.png")
+    out = a.out or os.path.join(a.case[0] if len(a.case) == 1 else ".", "rCFD_granulation.png")
     fig.savefig(out); plt.close(fig)
     print("written %s" % out)
 
