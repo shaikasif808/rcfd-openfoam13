@@ -57,7 +57,20 @@ Usage
         labelMaxCo    | Courant number above which a solver time step is divided into sub-steps for the labels | 1
         maxLabelSubCycles | largest number of label sub-steps per time step | 200
         writeFields   | write displacement fields at write times | no
+        extraFrameIntervals | further frame intervals [s], see below | ()
     \endtable
+
+    Several databases in one recording: with
+    \verbatim
+        extraFrameIntervals (0.010 0.015 0.020 0.025);
+    \endverbatim
+    every interval of the list gets its own position labels (three scalars per
+    phase more for each) and its own database in db_<interval in ms>ms/data,
+    e.g. db_10ms/data, with as many frames as fit into the recording time of the
+    database of the header. ./data is the same as without the entry. Each
+    folder db_..ms is a database folder of its own: link or copy its data/ into
+    a case folder (or name it in stages.txt) and set global_time_step and
+    number_of_frames in rCFD_user_run.h to its values.
 
     Other field names, or a single-phase solver (no phase fraction):
     \verbatim
@@ -132,8 +145,8 @@ class rCFDPrep
         label maxLabelSubCycles_;
 
         //- Largest label Courant number and sub-step count of the frame
-        scalar coFrame_;
-        label nSubFrame_;
+        scalarList coFrame_;
+        labelList nSubFrame_;
 
         //- Write the displacement of the last frame at write times
         Switch writeFields_;
@@ -174,14 +187,26 @@ class rCFDPrep
         vectorField imageCentre_;
         scalarList periodicDepth_;
 
-        //- Position labels: [3*phase + direction]
+        //- Position labels: [3*(set*nPhases + phase) + direction]. Set 0
+        //  belongs to the database of the user header, set k to the k-th
+        //  entry of extraFrameIntervals
         PtrList<volScalarField> labels_;
+
+        //- Further frame intervals (extraFrameIntervals)
+        scalarList extraIntervals_;
+
+        //- Per label set: frame interval, number of frames, folder of the
+        //  database ("" or "db_10ms/"), time of the next frame, complete
+        scalarList setInterval_;
+        labelList setFrames_;
+        List<fileName> setDir_;
+        scalarList nextFrameTime_;
+        boolList setDone_;
 
         //- State
         bool opened_;
         bool recording_;
         bool done_;
-        scalar nextFrameTime_;
         label nLateFrames_;
         scalar cpuLabels_;
 
@@ -219,13 +244,24 @@ class rCFDPrep
         void open();
 
         //- Set the labels to the cell centres
-        void resetLabels();
+        void resetLabels(const label seti = -1);
+
+        //- Index of a label field
+        label labelIndex
+        (
+            const label seti,
+            const label phasei,
+            const direction d
+        ) const
+        {
+            return 3*(seti*phaseNames_.size() + phasei) + d;
+        }
 
         //- Advance the labels of one phase over the time step just solved
         void solveLabels(const label phasei);
 
         //- Hand the frame to the library
-        void handOverFrame();
+        void handOverFrame(const label seti);
 
         //- Values of the own cells followed by the corona cells
         void cellAndCoronaValues

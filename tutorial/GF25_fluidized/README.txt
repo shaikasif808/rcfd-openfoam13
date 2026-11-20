@@ -50,3 +50,13 @@ Batch in stages on several databases (bed mass grows beyond what one recorded fl
   links to data/ and constant/ of its database, and writes rCFD_granulation.png for the whole batch.
   Needs package r6 (rcfd_run -init). Every stage must end within one job; with _growth_acceleration 10
   a batch of two hours needs about 8 hours on 32 processes.
+
+Several frame intervals in one recording (package r7): add to rCFDPrep1 in system/functions
+      extraFrameIntervals (0.010 0.015 0.020 0.025);
+  The recording then writes data/ (5 ms, 2000 frames, as before) and db_10ms/data (1000 frames),
+  db_15ms/data (666), db_20ms/data (500), db_25ms/data (400). Disk space of the 15 kg case: about
+  36 GB for data/ and about 45 GB for the four others together.
+  Compare them:   python3 <package>/py/rcfd_recurrence.py --case . db_10ms db_15ms db_20ms db_25ms --plane x=0 z=0.375
+  Use one in a batch in stages: name the folder in stages.txt, e.g.  /work/.../GF25_fluidizedbed_15kg/db_25ms  17.5
+  (the job script takes frame interval and number of frames from the database). In a single run:
+  link db_25ms/data as data/ into a case folder and set _global_time_step 0.025, _number_of_frames 400.

@@ -1,7 +1,7 @@
 # Hand-over: working on rcfd-openfoam13 in a new chat
 
 Read this first, then `docs/manual.md` (Part 3 explains how rCFD works, Part 1 how the package is
-used, Part 2 what was built and why). State of this note: 19 November 2026, package release r6.
+used, Part 2 what was built and why). State of this note: 20 November 2026, package release r7.
 
 ## What this repository is
 
@@ -94,5 +94,6 @@ Chats do not see each other. The repository is the only shared state.
 - Interpolation between a source cell and its face neighbours only; short frame intervals over-mix.
 - Source search of the recording is brute force per rank (minutes per frame for 250 000 cells per
   rank). Recording memory about 75 bytes per cell of the whole mesh on every rank.
-- One database per run; several databases of the same mesh are chained with `-init` (r6).
+- One database per run; several databases of the same mesh are chained with `-init` (r6). One recording can
+  write several databases with different frame intervals (`extraFrameIntervals`, r7).
 - Drift and local diffusion across periodic sides are untested.

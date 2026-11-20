@@ -31,6 +31,10 @@ rCFDPrep1
 
     phases          (air particles);    // order = phase index in the user headers
     recordStart     10;                  // s, after the start-up
+
+    // further databases of the same recording with other frame intervals, each in its own
+    // folder db_<ms>ms/data (release r7); multiples of the frame interval of the header
+    // extraFrameIntervals (0.010 0.015 0.020 0.025);
 }
 
 // ************************************************************************* //

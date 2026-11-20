@@ -2,6 +2,22 @@
 
 Newest first. One entry per piece of work: date, topic, files, what changed, tested / not tested.
 
+## 2026-11-20  Release r7: several frame intervals in one recording (granulation chat)
+
+- `functionObject/rCFDPrep.H/.C`: entry `extraFrameIntervals`; one label set per interval
+  (`labels_[3*(set*nPhases + phase) + d]`), frame times, completion and messages per set.
+- `src/rcfd_of_bridge.h/.c`: one library instance per database (`bridge_db_t`, `bridge_select`,
+  `bridge_store`); settings `n_extra`, `extra_intervals`; info `n_db`, `db_frames`, `db_interval`,
+  `db_dir`; new calls `rcfd_of_prep_frame_db`, `rcfd_of_prep_frames_written_db`,
+  `rcfd_of_prep_close_db`. The old calls act on database 0. A user function `user_set_file_dict` is
+  now called through the bridge. `src/rcfd_of_images.h`: paths with the folder of the database.
+- `lib/`, `src/rcfd_run_main.c`, `user/`: unchanged.
+- `tutorial/GF25_fluidized/run_gf25_batch.sbatch`: frame interval and frames of a stage from its
+  database.
+- Tested: see manual 2.9, release r7. Not tested: cluster, more than three further intervals.
+- Planned next, not started: second propagator moment (six more label fields per phase) for a local
+  diffusivity `data/local_diff`, as an option per phase.
+
 ## 2026-11-20  Recurrence statistics of a database (granulation chat)
 
 - `py/rcfd_recurrence.py` (new): reads `data/` and writes `recurrence/` in the case folder:
@@ -12,8 +28,6 @@ Newest first. One entry per piece of work: date, topic, files, what changed, tes
 - Tested: small fluidised bed (40 and 400 frames, 4 ranks), GF25 mesh with a two-frame database.
   Not tested: a full GF25 database (2000 frames, 32 ranks) and meshes with periodic sides (the
   displacement across a periodic side is counted as a long one).
-- Planned next, not started: several frame intervals in one recording (`rCFDPrep`,
-  `src/rcfd_of_bridge.c`) and the second propagator moment for a local diffusivity.
 
 ## 2026-11-19  Release r6: runs in stages on several databases (granulation chat)
 

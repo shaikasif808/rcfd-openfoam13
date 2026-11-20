@@ -61,6 +61,7 @@ typedef struct {
 } rcfd_of_mesh_t;
 
 #define RCFD_OF_MAX_PHASES 8
+#define RCFD_OF_MAX_DB     8       /* databases recorded in one run: the one of the header and up to 7 more */
 
 typedef struct {
 
@@ -71,6 +72,12 @@ typedef struct {
     int     bbox_nodes;             /* [1]   padded bounding box of each rank                        */
     int     write_topo;             /* [1]   write data/topo/{topo_<rank>,gid_<rank>.bin,meta.txt}   */
 
+    /* further databases of the same recording with other frame intervals (release r7). Database 0
+     * is the one of the user header in ./data. Database k = 1.. has the frame interval
+     * extra_intervals[k - 1], as many frames as fit into the recording time of database 0, and
+     * lies in ./db_<interval in ms>ms/data. Each one is a complete database of its own. */
+    int          n_extra;           /* [0]                                                           */
+    const double *extra_intervals;  /* [n_extra] frame intervals in s                                */
 } rcfd_of_prep_settings_t;
 
 /* what the user header set; read back from the library after its initialisation */
@@ -81,6 +88,10 @@ typedef struct {
     int     n_phases;
     double  vof_cutoff;
 
+    int     n_db;                               /* 1 + n_extra                                       */
+    int     db_frames[RCFD_OF_MAX_DB];          /* frames of every database, [0] = n_frames          */
+    double  db_interval[RCFD_OF_MAX_DB];        /* frame interval of every database                  */
+    char    db_dir[RCFD_OF_MAX_DB][64];         /* "" for database 0, else "db_10ms/"                */
 } rcfd_of_prep_info_t;
 
 RCFD_OF_API void rcfd_of_prep_default_settings(rcfd_of_prep_settings_t *s);
@@ -102,6 +113,14 @@ RCFD_OF_API int  rcfd_of_prep_frame_displ(const double *vof, const double *origi
 
 RCFD_OF_API int  rcfd_of_prep_frames_written(void);
 
+/* the same for database db (0 = the one of the user header); the labels handed over belong to
+ * the frame interval of that database */
+RCFD_OF_API int  rcfd_of_prep_frame_db(int db, const double *vof, const double *origin, const double *displ);
+RCFD_OF_API int  rcfd_of_prep_frames_written_db(int db);
+
+/* closes one database (recurrence path, meta file, checks) while the others go on; returns 0
+ * if it is complete. rcfd_of_prep_close() closes those still open. */
+RCFD_OF_API int  rcfd_of_prep_close_db(int db);
 /* recurrence path, meta file, checks; returns 0 if the database is complete */
 RCFD_OF_API int  rcfd_of_prep_close(void);
 

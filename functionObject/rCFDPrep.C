@@ -24,6 +24,7 @@
 #include "labelIOList.H"
 #include "IStringStream.H"
 #include "cpuTime.H"
+#include "OSspecific.H"
 
 #include "rcfd_of_bridge.h"
 
@@ -828,6 +829,15 @@ void Foam::functionObjects::rCFDPrep::open()
     s.phase_names = phaseList.c_str();
     s.norm_phase = normPhase_;
 
+    List<double> extra(extraIntervals_.size());
+    forAll(extra, i)
+    {
+        extra[i] = extraIntervals_[i];
+    }
+
+    s.n_extra = extra.size();
+    s.extra_intervals = extra.size() ? extra.begin() : nullptr;
+
     Info<< type() << " " << name() << ": opening the rCFD library ("
         << nGlobal << " cells, phases: " << phaseList.c_str()
         << ", user library " << userLibrary_.c_str() << ")" << endl;
@@ -922,14 +932,45 @@ void Foam::functionObjects::rCFDPrep::open()
         << frameInterval_ << " s from t = " << recordStart_ << " s"
         << " (rCFD_user_prep.h)" << endl;
 
+    forAll(setInterval_, seti)
+    {
+        setInterval_[seti] = info.db_interval[seti];
+        setFrames_[seti] = info.db_frames[seti];
+        setDir_[seti] = fileName(info.db_dir[seti]);
+
+        if (seti > 0)
+        {
+            // The patch file of the run mode belongs to every database
+            const word patchName
+            (
+                "patches_" + Foam::name(Pstream::myProcNo())
+            );
+
+            Foam::cp
+            (
+                fileName("data/topo")/patchName,
+                setDir_[seti]/"data/topo"/patchName
+            );
+
+            Info<< type() << " " << name() << ": " << setFrames_[seti]
+                << " frames of " << setInterval_[seti] << " s in "
+                << setDir_[seti].c_str() << "data (extraFrameIntervals)"
+                << endl;
+        }
+    }
+
     opened_ = true;
 }
 
 
-void Foam::functionObjects::rCFDPrep::resetLabels()
+void Foam::functionObjects::rCFDPrep::resetLabels(const label seti)
 {
+    const label nPerSet = 3*phaseNames_.size();
+
     forAll(labels_, i)
     {
+        if (seti >= 0 && i/nPerSet != seti) continue;
+
         volScalarField& X = labels_[i];
 
         if (displacementForm_)
@@ -1117,8 +1158,11 @@ void Foam::functionObjects::rCFDPrep::solveLabels(const label phasei)
             );
         }
 
-        coFrame_ = max(coFrame_, co);
-        nSubFrame_ = max(nSubFrame_, nSub);
+        forAll(coFrame_, seti)
+        {
+            coFrame_[seti] = max(coFrame_[seti], co);
+            nSubFrame_[seti] = max(nSubFrame_[seti], nSub);
+        }
     }
 
     // The displacement form always goes through the sub-step form of the
@@ -1213,39 +1257,53 @@ void Foam::functionObjects::rCFDPrep::solveLabels(const label phasei)
             const dField c0("c0", (mOld + f0*(mNew - mOld) + mRes)*rDtSub);
             const dField c1("c1", (mOld + f1*(mNew - mOld) + mRes)*rDtSub);
 
-            for (direction d = 0; d < 3; d++)
+            // Every label set that is still recording, with the same flux
+            forAll(setDone_, seti)
             {
-                if (solutionD[d] == -1) continue;
+                if (setDone_[seti]) continue;
 
-                volScalarField& X = labels_[3*phasei + d];
-
-                IStringStream scheme(divScheme_);
-
-                tmp<fvScalarMatrix> tXEqn
-                (
-                    fv::convectionScheme<scalar>::New(mesh_, flux, scheme)()
-                   .fvmDiv(flux, X)
-                  + fvm::Sp(c1 - contErr.internalField(), X)
-                  - fvm::Su(c0*X.internalField(), X)
-                );
-
-                if (displacementForm_)
+                for (direction d = 0; d < 3; d++)
                 {
-                    tXEqn.ref() -= fvm::Su(tSxi().component(d), X);
-                }
+                    if (solutionD[d] == -1) continue;
 
-                tXEqn.ref().solve(solverDict_);
+                    volScalarField& X = labels_[labelIndex(seti, phasei, d)];
+
+                    IStringStream scheme(divScheme_);
+
+                    tmp<fvScalarMatrix> tXEqn
+                    (
+                        fv::convectionScheme<scalar>::New
+                        (
+                            mesh_,
+                            flux,
+                            scheme
+                        )().fvmDiv(flux, X)
+                      + fvm::Sp(c1 - contErr.internalField(), X)
+                      - fvm::Su(c0*X.internalField(), X)
+                    );
+
+                    if (displacementForm_)
+                    {
+                        tXEqn.ref() -= fvm::Su(tSxi().component(d), X);
+                    }
+
+                    tXEqn.ref().solve(solverDict_);
+                }
             }
         }
 
         return;
     }
 
-    for (direction d = 0; d < 3; d++)
+    forAll(setDone_, seti)
     {
+      if (setDone_[seti]) continue;
+
+      for (direction d = 0; d < 3; d++)
+      {
         if (solutionD[d] == -1) continue;
 
-        volScalarField& X = labels_[3*phasei + d];
+        volScalarField& X = labels_[labelIndex(seti, phasei, d)];
 
         IStringStream scheme(divScheme_);
 
@@ -1284,11 +1342,12 @@ void Foam::functionObjects::rCFDPrep::solveLabels(const label phasei)
         }
 
         XEqn.solve(solverDict_);
+      }
     }
 }
 
 
-void Foam::functionObjects::rCFDPrep::handOverFrame()
+void Foam::functionObjects::rCFDPrep::handOverFrame(const label seti)
 {
     const label nInt = mesh_.nCells();
     const label nImg = imageFace_.size();
@@ -1336,7 +1395,7 @@ void Foam::functionObjects::rCFDPrep::handOverFrame()
                 const scalarField Xd
                 (
                     mesh_.C().primitiveField().component(d)
-                  + labels_[3*phasei + d].primitiveField()
+                  + labels_[labelIndex(seti, phasei, d)].primitiveField()
                 );
 
                 cellAndCoronaValues(Xd, origin, 3, offset + d);
@@ -1345,7 +1404,7 @@ void Foam::functionObjects::rCFDPrep::handOverFrame()
             {
                 cellAndCoronaValues
                 (
-                    labels_[3*phasei + d].primitiveField(),
+                    labels_[labelIndex(seti, phasei, d)].primitiveField(),
                     origin,
                     3,
                     offset + d
@@ -1434,7 +1493,8 @@ void Foam::functionObjects::rCFDPrep::handOverFrame()
         }
     }
 
-    if (writeFields_)
+    // Displacement fields for ParaView: those of the database of the header
+    if (writeFields_ && seti == 0)
     {
         forAll(phaseNames_, phasei)
         {
@@ -1523,7 +1583,7 @@ void Foam::functionObjects::rCFDPrep::handOverFrame()
         }
     }
 
-    rcfd_of_prep_frame_displ(vof.begin(), origin.begin(), displ.begin());
+    rcfd_of_prep_frame_db(seti, vof.begin(), origin.begin(), displ.begin());
 }
 
 
@@ -1545,8 +1605,8 @@ Foam::functionObjects::rCFDPrep::rCFDPrep
     residualAlpha_(1e-6),
     labelMaxCo_(1),
     maxLabelSubCycles_(200),
-    coFrame_(0),
-    nSubFrame_(1),
+    coFrame_(),
+    nSubFrame_(),
     writeFields_(false),
     labelForm_("auto"),
     displacementForm_(false),
@@ -1559,10 +1619,15 @@ Foam::functionObjects::rCFDPrep::rCFDPrep
     imageCentre_(),
     periodicDepth_(),
     labels_(),
+    extraIntervals_(),
+    setInterval_(),
+    setFrames_(),
+    setDir_(),
+    nextFrameTime_(),
+    setDone_(),
     opened_(false),
     recording_(false),
     done_(false),
-    nextFrameTime_(great),
     nLateFrames_(0),
     cpuLabels_(0),
     coronaFace_()
@@ -1578,22 +1643,39 @@ Foam::functionObjects::rCFDPrep::rCFDPrep
 
     const word cmptNames[3] = {"x", "y", "z"};
 
-    labels_.setSize(3*phaseNames_.size());
+    // One label set for the database of the header and one for every
+    // further frame interval
+    const label nSets = 1 + extraIntervals_.size();
 
+    setInterval_.setSize(nSets, 0);
+    setFrames_.setSize(nSets, 0);
+    setDir_.setSize(nSets);
+    nextFrameTime_.setSize(nSets, great);
+    setDone_.setSize(nSets, false);
+    coFrame_.setSize(nSets, 0);
+    nSubFrame_.setSize(nSets, 1);
+
+    labels_.setSize(3*phaseNames_.size()*nSets);
+
+    for (label seti = 0; seti < nSets; seti++)
     forAll(phaseNames_, phasei)
     {
         for (direction d = 0; d < 3; d++)
         {
             labels_.set
             (
-                3*phasei + d,
+                labelIndex(seti, phasei, d),
                 new volScalarField
                 (
                     IOobject
                     (
                         IOobject::groupName
                         (
-                            word("rCFD" + cmptNames[d]),
+                            word
+                            (
+                                "rCFD" + cmptNames[d]
+                              + (seti ? Foam::name(seti) : word::null)
+                            ),
                             phaseNames_[phasei]
                         ),
                         time_.name(),
@@ -1761,6 +1843,27 @@ bool Foam::functionObjects::rCFDPrep::read(const dictionary& dict)
     }
     writeFields_ = dict.lookupOrDefault<Switch>("writeFields", false);
 
+    extraIntervals_ =
+        dict.lookupOrDefault<scalarList>("extraFrameIntervals", scalarList());
+
+    if (extraIntervals_.size() > RCFD_OF_MAX_DB - 1)
+    {
+        FatalIOErrorInFunction(dict)
+            << "extraFrameIntervals holds " << extraIntervals_.size()
+            << " intervals, at most " << RCFD_OF_MAX_DB - 1 << " are possible"
+            << exit(FatalIOError);
+    }
+
+    forAll(extraIntervals_, i)
+    {
+        if (extraIntervals_[i] <= 0)
+        {
+            FatalIOErrorInFunction(dict)
+                << "extraFrameIntervals: " << extraIntervals_[i]
+                << " s is not a frame interval" << exit(FatalIOError);
+        }
+    }
+
     labelForm_ = dict.lookupOrDefault<word>("labelForm", "auto");
     periodicImages_ = dict.lookupOrDefault<Switch>("periodicImages", true);
 
@@ -1806,7 +1909,7 @@ bool Foam::functionObjects::rCFDPrep::execute()
     }
 
     const scalar t = time_.value();
-    const scalar tol = 1e-6*frameInterval_;
+    const scalar tol = 1e-6*min(setInterval_);
 
     if (!recording_)
     {
@@ -1822,7 +1925,11 @@ bool Foam::functionObjects::rCFDPrep::execute()
             // spin-up): the labels are at the cell centres since the start,
             // so the first time step belongs to the first frame
             recording_ = true;
-            nextFrameTime_ = tOld + frameInterval_;
+
+            forAll(nextFrameTime_, seti)
+            {
+                nextFrameTime_[seti] = tOld + setInterval_[seti];
+            }
 
             Info<< type() << " " << name() << ": recording starts at t = "
                 << tOld << " s (start of the run)" << endl;
@@ -1834,7 +1941,11 @@ bool Foam::functionObjects::rCFDPrep::execute()
                 resetLabels();
 
                 recording_ = true;
-                nextFrameTime_ = t + frameInterval_;
+
+                forAll(nextFrameTime_, seti)
+                {
+                    nextFrameTime_[seti] = t + setInterval_[seti];
+                }
 
                 Info<< type() << " " << name() << ": recording starts at t = "
                     << t << " s" << endl;
@@ -1844,7 +1955,7 @@ bool Foam::functionObjects::rCFDPrep::execute()
         }
     }
 
-    // Advance the labels over the time step just solved
+    // Advance the labels of all sets over the time step just solved
     {
         cpuTime timer;
 
@@ -1861,9 +1972,21 @@ bool Foam::functionObjects::rCFDPrep::execute()
         cpuLabels_ += timer.elapsedCpuTime();
     }
 
-    if (t >= nextFrameTime_ - tol)
+    forAll(setDone_, seti)
     {
-        if (t > nextFrameTime_ + tol)
+        if (setDone_[seti]) continue;
+
+        const scalar tolSet = 1e-6*setInterval_[seti];
+
+        // "db_10ms/data" for a further database
+        const std::string dbName
+        (
+            seti ? std::string(setDir_[seti]) + "data" : std::string("data")
+        );
+
+        if (t < nextFrameTime_[seti] - tolSet) continue;
+
+        if (t > nextFrameTime_[seti] + tolSet)
         {
             nLateFrames_++;
 
@@ -1871,42 +1994,77 @@ bool Foam::functionObjects::rCFDPrep::execute()
             {
                 WarningInFunction
                     << "Frame taken at t = " << t << " s, "
-                    << t - nextFrameTime_ << " s after its time. Use "
+                    << t - nextFrameTime_[seti] << " s after its time. Use "
                     << "adjustTimeStep yes or a time step that divides the "
-                    << "frame interval." << endl;
+                    << "frame interval"
+                    << (seti ? " (" + dbName + ")" : std::string()).c_str()
+                    << "." << endl;
             }
         }
 
         Info<< type() << " " << name() << ": frame "
-            << rcfd_of_prep_frames_written() << ": label Courant number up to "
-            << coFrame_ << ", up to " << nSubFrame_
+            << rcfd_of_prep_frames_written_db(seti)
+            << (seti ? " of " + dbName : std::string()).c_str()
+            << ": label Courant number up to "
+            << coFrame_[seti] << ", up to " << nSubFrame_[seti]
             << " label sub-steps per time step"
             << (
-                   coFrame_ > labelMaxCo_*maxLabelSubCycles_*(1 + 1e-6)
+                   coFrame_[seti]
+                 > labelMaxCo_*maxLabelSubCycles_*(1 + 1e-6)
                  ? " (limited by maxLabelSubCycles)"
                  : ""
                )
             << endl;
 
-        coFrame_ = 0;
-        nSubFrame_ = 1;
+        coFrame_[seti] = 0;
+        nSubFrame_[seti] = 1;
 
-        handOverFrame();
-        resetLabels();
+        handOverFrame(seti);
+        resetLabels(seti);
 
-        nextFrameTime_ += frameInterval_;
+        nextFrameTime_[seti] += setInterval_[seti];
 
-        if (rcfd_of_prep_frames_written() >= nFrames_)
+        if (rcfd_of_prep_frames_written_db(seti) >= setFrames_[seti])
         {
-            rcfd_of_prep_close();
+            // This database is complete; the others go on
+            rcfd_of_prep_close_db(seti);
 
-            done_ = true;
+            setDone_[seti] = true;
 
-            Info<< type() << " " << name() << ": database complete at t = "
-                << t << " s (" << nFrames_ << " frames, label transport "
-                << cpuLabels_ << " s cpu on the master). The simulation can "
-                << "be stopped." << endl;
+            if (setDone_.size() > 1)
+            {
+                Info<< type() << " " << name() << ": "
+                    << dbName.c_str()
+                    << " complete at t = " << t << " s ("
+                    << setFrames_[seti] << " frames of "
+                    << setInterval_[seti] << " s)" << endl;
+            }
         }
+    }
+
+    bool allDone = true;
+    forAll(setDone_, seti)
+    {
+        allDone = allDone && setDone_[seti];
+    }
+
+    if (allDone)
+    {
+        rcfd_of_prep_close();
+
+        done_ = true;
+
+        Info<< type() << " " << name() << ": database complete at t = "
+            << t << " s (" << nFrames_ << " frames";
+
+        if (setDone_.size() > 1)
+        {
+            Info<< " and " << setDone_.size() - 1 << " further databases";
+        }
+
+        Info<< ", label transport "
+            << cpuLabels_ << " s cpu on the master). The simulation can "
+            << "be stopped." << endl;
     }
 
     return true;
@@ -1963,7 +2121,18 @@ Foam::scalar Foam::functionObjects::rCFDPrep::timeToNextAction()
         return (recordStart_ > t) ? recordStart_ - t : vGreat;
     }
 
-    return max(nextFrameTime_ - t, scalar(0));
+    // The next frame of any database that is still recording
+    scalar tNext = vGreat;
+
+    forAll(setDone_, seti)
+    {
+        if (!setDone_[seti])
+        {
+            tNext = min(tNext, nextFrameTime_[seti]);
+        }
+    }
+
+    return max(tNext - t, scalar(0));
 }
 
 

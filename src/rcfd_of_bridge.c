@@ -31,6 +31,61 @@ static rcfd_of_prep_settings_t g_set;
 static void     *g_user_lib = NULL;
 static int      g_interpolation = -1;      /* -1 not known yet, 0 off, 1 on */
 
+/* Several databases in one recording (release r7). The variables above that belong to one
+ * database (g_h, frames, frame interval, counters, timings) are the working copy of the
+ * database in use; bridge_select() loads it from its slot, bridge_store() puts it back.
+ * g_dir is the path in front of "data/": "" for database 0, "db_10ms/" for the others. */
+typedef struct {
+    void      *h;
+    int       open, n_frames, frames_written, interpolation;
+    int       set_frames;                  /* > 0: number of frames instead of the header's   */
+    double    set_interval;                /* > 0: frame interval instead of the header's     */
+    double    interval, t_shift, t_interp, t_write;
+    long long total_shifts[RCFD_OF_MAX_PHASES], total_incoming[RCFD_OF_MAX_PHASES], c2c_offset[RCFD_OF_MAX_PHASES];
+    char      dir[64];
+} bridge_db_t;
+
+static bridge_db_t g_db[RCFD_OF_MAX_DB];
+static int         g_n_db = 0, g_n_db_open = 0;
+static char        g_dir[64] = "";
+
+static void bridge_select(int k)
+{
+    const bridge_db_t *b = &g_db[k];
+    int p;
+
+    g_h = b->h; g_n_frames = b->n_frames; g_frames_written = b->frames_written; g_interpolation = b->interpolation;
+    g_frame_interval = b->interval; g_t_shift = b->t_shift; g_t_interp = b->t_interp; g_t_write = b->t_write;
+
+    for(p = 0; p < RCFD_OF_MAX_PHASES; p++){
+        g_total_shifts[p] = b->total_shifts[p]; g_total_incoming[p] = b->total_incoming[p]; g_c2c_offset[p] = b->c2c_offset[p];
+    }
+
+    snprintf(g_dir, sizeof(g_dir), "%s", b->dir);
+}
+
+static void bridge_store(int k)
+{
+    bridge_db_t *b = &g_db[k];
+    int p;
+
+    b->h = g_h; b->n_frames = g_n_frames; b->frames_written = g_frames_written; b->interpolation = g_interpolation;
+    b->interval = g_frame_interval; b->t_shift = g_t_shift; b->t_interp = g_t_interp; b->t_write = g_t_write;
+
+    for(p = 0; p < RCFD_OF_MAX_PHASES; p++){
+        b->total_shifts[p] = g_total_shifts[p]; b->total_incoming[p] = g_total_incoming[p]; b->c2c_offset[p] = g_c2c_offset[p];
+    }
+}
+
+static const bridge_db_t *bridge_db_of_handle(void *h)
+{
+    int k;
+
+    for(k = 0; k < g_n_db; k++){ if(g_db[k].h == h) return &g_db[k]; }
+
+    return NULL;
+}
+
 #include "rcfd_of_images.h"
 
 /* ------------------------------------------------------------------------- */
@@ -43,18 +98,60 @@ static int      g_interpolation = -1;      /* -1 not known yet, 0 off, 1 on */
 /* ------------------------------------------------------------------------- */
 
 static void (*g_user_solver_dict)(void *) = NULL;
+static void (*g_user_file_dict)(void *)   = NULL;
 
 static void bridge_set_solver_dict(void *h)
 {
+    const bridge_db_t *b = bridge_db_of_handle(h);
+
     if(g_user_solver_dict) g_user_solver_dict(h);
+
+    /* a further database of the recording: its own frame interval and number of frames */
+    if(b != NULL && b->set_interval > 0.0){
+
+        rcfd_set_dict_property_r(h, "Solver_Dict", -1, -1, -1, "global_time_step", b->set_interval);
+        rcfd_set_dict_property_i(h, "Solver_Dict", -1, -1, -1, "number_of_frames", b->set_frames);
+    }
 
     /* the function object hands over position labels, one frame per call */
     rcfd_set_dict_property_i(h, "Solver_Dict", -1, -1, -1, "shifts_from_displacement_fields_on", 1);
     rcfd_set_dict_property_i(h, "Solver_Dict", -1, -1, -1, "time_steps_per_monitoring_interval", 1);
 }
 
+/* a further database of the recording lies in its own folder: db_<..>ms/data, db_<..>ms/post */
+static void bridge_set_file_dict(void *h)
+{
+    const bridge_db_t *b = bridge_db_of_handle(h);
+
+    if(g_user_file_dict) g_user_file_dict(h);
+
+    if(b != NULL && b->dir[0] != 0){
+
+        char dir[64], trn[96];
+        size_t n;
+
+        snprintf(dir, sizeof(dir), "%s", b->dir);
+
+        n = strlen(dir);
+
+        if(n > 0 && dir[n - 1] == '/') dir[n - 1] = 0;
+
+        snprintf(trn, sizeof(trn), "./rCFD_prep_%s.trn", dir);
+
+        rcfd_set_dict_property_s(h, "File_Dict", -1, -1, -1, "working_dir", dir);
+        rcfd_set_dict_property_s(h, "File_Dict", -1, -1, -1, "Prep_Transscript_filename", trn);
+    }
+}
+
 int rcfd_of_register_user_function(void *handle, const char *name, void (*f)(void))
 {
+    if(strcmp(name, "user_set_file_dict") == 0){
+
+        g_user_file_dict = (void(*)(void*))f;
+
+        return 0;       /* bridge_set_file_dict is registered and calls it */
+    }
+
     if(strcmp(name, "user_set_solver_dict") == 0){
 
         g_user_solver_dict = (void(*)(void*))f;
@@ -140,7 +237,7 @@ static void prep_count_written_shifts(int i_phase, long long *n_interior, long l
 
     *n_interior = 0; *n_incoming = 0;
 
-    snprintf(name, sizeof(name), "data/c2c/c2c_0_%d_%d", i_phase, of_rank);
+    snprintf(name, sizeof(name), "%sdata/c2c/c2c_0_%d_%d", g_dir, i_phase, of_rank);
 
     size = of_file_size(name);
 
@@ -168,7 +265,7 @@ static void prep_count_written_shifts(int i_phase, long long *n_interior, long l
 static void prep_remove_stale_files(void)
 {
     static const char *pattern[5] = {"data/c2c/c2c_0_%d_%d", "data/vof/vof_0_%d_%d", "data/tmp/norm_0_%d", "data/topo/topo_%d", "data/topo/gid_%d.bin"};
-    char name[256];
+    char name[256], pat[160];
     int  r, p, k, removed = 0, found;
 
     if(of_rank != 0) return;
@@ -183,8 +280,10 @@ static void prep_remove_stale_files(void)
 
             for(p = 0; p < RCFD_OF_MAX_PHASES; p++){
 
-                if(k >= 2){ if(p > 0) break; snprintf(name, sizeof(name), pattern[k], r); }
-                else       { snprintf(name, sizeof(name), pattern[k], p, r); }
+                snprintf(pat, sizeof(pat), "%s%s", g_dir, pattern[k]);
+
+                if(k >= 2){ if(p > 0) break; snprintf(name, sizeof(name), pat, r); }
+                else       { snprintf(name, sizeof(name), pat, p, r); }
 
                 if(of_file_exists(name)){ found = 1; if(remove(name) == 0) removed++; }
             }
@@ -340,10 +439,12 @@ static void bridge_write_topo(const of_topo_t *T_prep)
     /* the run mode has no image cells and has the periodic connections as faces */
     bridge_build_run_topology(T_prep, T, &per_face, &per_dist, &n_per);
 
-    bridge_mkdir("data");
-    bridge_mkdir("data/topo");
+    if(g_dir[0] != 0){ snprintf(name, sizeof(name), "%s", g_dir); name[strlen(name) - 1] = 0; bridge_mkdir(name); }
 
-    snprintf(name, sizeof(name), "data/topo/topo_%d", of_rank);
+    snprintf(name, sizeof(name), "%sdata", g_dir);      bridge_mkdir(name);
+    snprintf(name, sizeof(name), "%sdata/topo", g_dir); bridge_mkdir(name);
+
+    snprintf(name, sizeof(name), "%sdata/topo/topo_%d", g_dir, of_rank);
 
     f = fopen(name, "w");
 
@@ -359,7 +460,7 @@ static void bridge_write_topo(const of_topo_t *T_prep)
 
     if(fclose(f) != 0) of_abort("error while writing '%s'", name);
 
-    snprintf(name, sizeof(name), "data/topo/gid_%d.bin", of_rank);
+    snprintf(name, sizeof(name), "%sdata/topo/gid_%d.bin", g_dir, of_rank);
 
     f = fopen(name, "wb");
 
@@ -390,11 +491,13 @@ static void bridge_write_topo(const of_topo_t *T_prep)
 
         if(of_rank == 0){
 
-            f = fopen("data/topo/cell_rank.bin", "wb");
+            snprintf(name, sizeof(name), "%sdata/topo/cell_rank.bin", g_dir);
 
-            if(f == NULL) of_abort("cannot write 'data/topo/cell_rank.bin': %s", strerror(errno));
+            f = fopen(name, "wb");
 
-            if(of_fwrite_le(glob, sizeof(int32_t), (size_t)of_n_cells_global, f) != (size_t)of_n_cells_global) of_abort("error while writing 'data/topo/cell_rank.bin'");
+            if(f == NULL) of_abort("cannot write '%s': %s", name, strerror(errno));
+
+            if(of_fwrite_le(glob, sizeof(int32_t), (size_t)of_n_cells_global, f) != (size_t)of_n_cells_global) of_abort("error while writing '%s'", name);
 
             fclose(f);
         }
@@ -404,9 +507,11 @@ static void bridge_write_topo(const of_topo_t *T_prep)
 
     if(of_rank == 0){
 
-        f = fopen("data/topo/meta.txt", "w");
+        snprintf(name, sizeof(name), "%sdata/topo/meta.txt", g_dir);
 
-        if(f == NULL) of_abort("cannot write 'data/topo/meta.txt': %s", strerror(errno));
+        f = fopen(name, "w");
+
+        if(f == NULL) of_abort("cannot write '%s': %s", name, strerror(errno));
 
         fprintf(f, "%d %d\n", of_n_cells_global, of_size);
 
@@ -414,7 +519,7 @@ static void bridge_write_topo(const of_topo_t *T_prep)
     }
 
     /* faces across periodic patches: face index and distance of the two cell centres */
-    snprintf(name, sizeof(name), "data/topo/periodic_%d", of_rank);
+    snprintf(name, sizeof(name), "%sdata/topo/periodic_%d", g_dir, of_rank);
 
     f = fopen(name, "w");
 
@@ -433,7 +538,7 @@ static void bridge_write_topo(const of_topo_t *T_prep)
 
         MPI_Allreduce(loc, sum, 2, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
 
-        if(sum[0] > 0)
+        if(sum[0] > 0 && g_dir[0] == 0)
             of_msg("run topology: %lld faces across periodic patches (counted on both sides where the two cells are on different ranks), %lld corona cells added for them", sum[0], sum[1]);
     }
 
@@ -448,12 +553,15 @@ static void bridge_write_topo(const of_topo_t *T_prep)
 static void bridge_write_prep_info(void)
 {
     FILE *f;
+    char name[256];
 
     if(of_rank != 0) return;
 
-    f = fopen("data/rcfd_foam_prep.txt", "w");
+    snprintf(name, sizeof(name), "%sdata/rcfd_foam_prep.txt", g_dir);
 
-    if(f == NULL){ of_msg("WARNING: cannot write data/rcfd_foam_prep.txt: %s", strerror(errno)); return; }
+    f = fopen(name, "w");
+
+    if(f == NULL){ of_msg("WARNING: cannot write %s: %s", name, strerror(errno)); return; }
 
     fprintf(f, "frame_interval = %.17g\n", g_frame_interval);
     fprintf(f, "n_frames = %d\n", g_n_frames);
@@ -476,11 +584,13 @@ void rcfd_of_prep_default_settings(rcfd_of_prep_settings_t *s)
     s->norm_phase   = -1;
     s->bbox_nodes   = 1;
     s->write_topo   = 1;
+    s->n_extra      = 0;
+    s->extra_intervals = NULL;
 }
 
 static int bridge_open(const rcfd_of_mesh_t *mesh, const rcfd_of_prep_settings_t *s, rcfd_of_prep_info_t *info)
 {
-    int     i, flag = 0, n_cells;
+    int     i, k, flag = 0, n_cells;
     void    *h = NULL;
 
     if(g_open){ fprintf(stderr, "[rcfd_of] ERROR: rcfd_of_prep_open called twice\n"); return -1; }
@@ -550,50 +660,131 @@ static int bridge_open(const rcfd_of_mesh_t *mesh, const rcfd_of_prep_settings_t
             of_msg("preparation: %lld image cells behind periodic patches (neighbours for the interpolation of the shifts; not in the database)", g_img);
     }
 
-    /* library in preparation mode: topology from the solver, everything else from the user header */
-    rcfd_open(0, NULL, MPI_COMM_WORLD, &h);
+    g_n_db = 1 + (s->n_extra > 0 ? s->n_extra : 0);
 
-    of_register_topology(h, 1);
+    if(g_n_db > RCFD_OF_MAX_DB) of_abort("%d further frame intervals asked for (at most %d)", s->n_extra, RCFD_OF_MAX_DB - 1);
 
-    rcfd_register_user_function(h, "user_set_solver_dict", (void(*)(void))bridge_set_solver_dict);
+    memset(g_db, 0, sizeof(g_db));
 
-    bridge_load_user_library(h, s->user_library);
+    /* one library instance per database: 0 is the one of the user header in ./data, the others
+     * differ in frame interval, number of frames and folder only */
+    for(k = 0; k < g_n_db; k++){
 
-    rcfd_init(h, RCFD_MODE_PREPARATION);
+        bridge_db_t *b = &g_db[k];
+        char        name[256];
 
-    if(!rcfd_is_initialized(h)) of_abort("rcfd_init failed");
+        b->interpolation = -1;
 
-    of_check_library_topology(h, &of_topo);
+        if(k > 0){
 
-    g_n_frames       = rcfd_get_frame_count(h);
-    g_n_phases       = rcfd_get_phase_count(h);
-    g_frame_interval = rcfd_get_global_timestep(h);
-    g_cutoff         = rcfd_get_vof_cutoff_limit(h);
+            double dt = s->extra_intervals[k - 1];
+            int    j;
 
-    if(g_n_phases != s->n_phases)
-        of_abort("rCFD_user_prep.h sets number_of_phases = %d, the function object hands over %d phases (%s)",
-                 g_n_phases, s->n_phases, s->phase_names ? s->phase_names : "");
+            if(!(dt > 0.0)) of_abort("further frame interval %d is %g s", k, dt);
 
-    if(g_n_frames < 2)             of_abort("rCFD_user_prep.h: number_of_frames = %d (at least 2)", g_n_frames);
-    if(!(g_frame_interval > 0.0))  of_abort("rCFD_user_prep.h: global_time_step = %g s", g_frame_interval);
+            for(j = 0; j < k; j++){
 
-    if(!rcfd_is_shifts_from_displacement_fields_on(h)) of_abort("the library did not take shifts_from_displacement_fields_on");
+                if(fabs(g_db[j].interval - dt) <= 1.0e-9 * dt)
+                    of_abort("the frame interval %g s is given twice (database 0 has the one of rCFD_user_prep.h)", dt);
+            }
 
-    g_norm_phase = (s->norm_phase >= 0 && s->norm_phase < g_n_phases) ? s->norm_phase : g_n_phases - 1;
+            b->set_interval = dt;
+            b->set_frames   = (int)floor(g_db[0].n_frames * g_db[0].interval / dt + 1.0e-6);
 
-    of_msg("preparation (rCFD_user_prep.h): %d frames of %g s, %d phases (%s), vof cutoff %g",
-           g_n_frames, g_frame_interval, g_n_phases, s->phase_names ? s->phase_names : "", g_cutoff);
+            if(b->set_frames < 2)
+                of_abort("frame interval %g s: %d frames fit into the %g s of the recording (at least 2 are needed)",
+                         dt, b->set_frames, g_db[0].n_frames * g_db[0].interval);
 
-    prep_remove_stale_files();
+            snprintf(b->dir, sizeof(b->dir), "db_%gms/", 1.0e3 * dt);
 
-    if(s->write_topo) bridge_write_topo(&of_topo);
+            snprintf(name, sizeof(name), "%s", b->dir); name[strlen(name) - 1] = 0;
 
-    bridge_mkdir("data");
-    bridge_write_prep_info();
+            bridge_mkdir(name);
+        }
+
+        snprintf(g_dir, sizeof(g_dir), "%s", b->dir);
+
+        /* library in preparation mode: topology from the solver, everything else from the user header */
+        h = NULL;
+
+        rcfd_open(0, NULL, MPI_COMM_WORLD, &h);
+
+        b->h = h;       /* the dict functions below find the settings of this database through the handle */
+
+        of_register_topology(h, 1);
+
+        rcfd_register_user_function(h, "user_set_solver_dict", (void(*)(void))bridge_set_solver_dict);
+        rcfd_register_user_function(h, "user_set_file_dict",   (void(*)(void))bridge_set_file_dict);
+
+        bridge_load_user_library(h, s->user_library);
+
+        rcfd_init(h, RCFD_MODE_PREPARATION);
+
+        if(!rcfd_is_initialized(h)) of_abort("rcfd_init failed");
+
+        of_check_library_topology(h, &of_topo);
+
+        g_h              = h;
+        g_n_frames       = rcfd_get_frame_count(h);
+        g_frame_interval = rcfd_get_global_timestep(h);
+
+        if(k == 0){
+
+            g_n_phases = rcfd_get_phase_count(h);
+            g_cutoff   = rcfd_get_vof_cutoff_limit(h);
+
+            if(g_n_phases != s->n_phases)
+                of_abort("rCFD_user_prep.h sets number_of_phases = %d, the function object hands over %d phases (%s)",
+                         g_n_phases, s->n_phases, s->phase_names ? s->phase_names : "");
+
+            if(g_n_frames < 2)             of_abort("rCFD_user_prep.h: number_of_frames = %d (at least 2)", g_n_frames);
+            if(!(g_frame_interval > 0.0))  of_abort("rCFD_user_prep.h: global_time_step = %g s", g_frame_interval);
+
+            g_norm_phase = (s->norm_phase >= 0 && s->norm_phase < g_n_phases) ? s->norm_phase : g_n_phases - 1;
+
+            of_msg("preparation (rCFD_user_prep.h): %d frames of %g s, %d phases (%s), vof cutoff %g",
+                   g_n_frames, g_frame_interval, g_n_phases, s->phase_names ? s->phase_names : "", g_cutoff);
+        }
+        else{
+
+            if(g_n_frames != b->set_frames || fabs(g_frame_interval - b->set_interval) > 1.0e-9 * b->set_interval)
+                of_abort("the library did not take the settings of the further database %sdata (%d frames of %g s instead of %d of %g s)",
+                         b->dir, g_n_frames, g_frame_interval, b->set_frames, b->set_interval);
+
+            if(rcfd_get_phase_count(h) != g_n_phases) of_abort("further database %sdata: %d phases instead of %d", b->dir, rcfd_get_phase_count(h), g_n_phases);
+
+            of_msg("preparation: further database in %sdata: %d frames of %g s (same recording, own position labels)",
+                   b->dir, g_n_frames, g_frame_interval);
+        }
+
+        if(!rcfd_is_shifts_from_displacement_fields_on(h)) of_abort("the library did not take shifts_from_displacement_fields_on");
+
+        prep_remove_stale_files();
+
+        if(s->write_topo) bridge_write_topo(&of_topo);
+
+        snprintf(name, sizeof(name), "%sdata", g_dir);
+
+        bridge_mkdir(name);
+        bridge_write_prep_info();
+
+        g_frames_written = 0;
+        g_interpolation  = -1;
+
+        for(i = 0; i < RCFD_OF_MAX_PHASES; i++){ g_c2c_offset[i] = 0; g_total_shifts[i] = 0; g_total_incoming[i] = 0; }
+
+        g_t_shift = 0.0; g_t_interp = 0.0; g_t_write = 0.0;
+
+        bridge_store(k);
+
+        b->open = 1;
+    }
+
+    g_n_db_open = g_n_db;
 
     n_cells       = of_topo.n_cells;
-    g_norm_count  = rcfd_get_norm_count(h);
-    g_norm_coarse = rcfd_get_norm_coarsening(h);
+    g_norm_count  = rcfd_get_norm_count(g_db[0].h);
+    g_norm_coarse = rcfd_get_norm_coarsening(g_db[0].h);
 
     if(g_norm_coarse < 1) g_norm_coarse = 1;
 
@@ -606,19 +797,27 @@ static int bridge_open(const rcfd_of_mesh_t *mesh, const rcfd_of_prep_settings_t
 
     for(i = 0; i < n_cells; i++) g_vof[i] = &g_vof_mem[(size_t)g_n_phases * i];
 
-    for(i = 0; i < RCFD_OF_MAX_PHASES; i++){ g_c2c_offset[i] = 0; g_total_shifts[i] = 0; g_total_incoming[i] = 0; }
-
-    g_t_shift = 0.0; g_t_interp = 0.0; g_t_write = 0.0;
-
     if(info){
 
-        info->n_frames       = g_n_frames;
-        info->frame_interval = g_frame_interval;
+        memset(info, 0, sizeof(*info));
+
+        info->n_frames       = g_db[0].n_frames;
+        info->frame_interval = g_db[0].interval;
         info->n_phases       = g_n_phases;
         info->vof_cutoff     = g_cutoff;
+        info->n_db           = g_n_db;
+
+        for(k = 0; k < g_n_db; k++){
+
+            info->db_frames[k]   = g_db[k].n_frames;
+            info->db_interval[k] = g_db[k].interval;
+
+            snprintf(info->db_dir[k], sizeof(info->db_dir[k]), "%s", g_db[k].dir);
+        }
     }
 
-    g_h    = h;
+    bridge_select(0);
+
     g_open = 1;
 
     return 0;
@@ -626,19 +825,32 @@ static int bridge_open(const rcfd_of_mesh_t *mesh, const rcfd_of_prep_settings_t
 
 int rcfd_of_prep_frames_written(void)
 {
-    return g_frames_written;
+    return g_db[0].frames_written;
 }
 
-static int bridge_frame(const double *vof_in, const double *origin_in, const double *displ_in)
+int rcfd_of_prep_frames_written_db(int db)
 {
-    void    *h = g_h;
-    int     i, d, p, err, i_frame = g_frames_written, np = g_n_phases;
+    return (db >= 0 && db < g_n_db) ? g_db[db].frames_written : 0;
+}
+
+static int bridge_frame(int db, const double *vof_in, const double *origin_in, const double *displ_in)
+{
+    void    *h;
+    int     i, d, p, err, i_frame, np = g_n_phases;
     int     n_cells = of_topo.n_cells, n_int = of_topo.n_int - g_n_img;     /* without image cells */
     long long loc[3 * RCFD_OF_MAX_PHASES], glob[3 * RCFD_OF_MAX_PHASES];
     double  t0, ts, ti, tw;
     double  dl[RCFD_OF_MAX_PHASES], dg[RCFD_OF_MAX_PHASES], ml[RCFD_OF_MAX_PHASES], mg[RCFD_OF_MAX_PHASES];
 
     if(!g_open) of_abort("rcfd_of_prep_frame called before rcfd_of_prep_open");
+
+    if(db < 0 || db >= g_n_db) of_abort("rcfd_of_prep_frame: database %d of %d", db, g_n_db);
+
+    if(!g_db[db].open) return g_db[db].frames_written;      /* closed: full */
+
+    bridge_select(db);
+
+    h = g_h; i_frame = g_frames_written;
 
     if(i_frame >= g_n_frames) return g_frames_written;      /* database is full */
 
@@ -772,7 +984,8 @@ static int bridge_frame(const double *vof_in, const double *origin_in, const dou
         char line[2048];
         int  len = 0;
 
-        len += snprintf(line + len, sizeof(line) - (size_t)len, "[rcfd_of] frame %4d/%d:", i_frame, g_n_frames);
+        if(db == 0) len += snprintf(line + len, sizeof(line) - (size_t)len, "[rcfd_of] frame %4d/%d:", i_frame, g_n_frames);
+        else        len += snprintf(line + len, sizeof(line) - (size_t)len, "[rcfd_of] %.*s frame %4d/%d:", (int)strlen(g_dir) - 1, g_dir, i_frame, g_n_frames);
 
         for(p = 0; p < np && len < (int)sizeof(line) - 200; p++){
 
@@ -793,21 +1006,26 @@ static int bridge_frame(const double *vof_in, const double *origin_in, const dou
 
     g_frames_written++;
 
+    bridge_store(db);
+
     return g_frames_written;
 }
 
-static int bridge_close(void)
+/* one database: recurrence path, meta file, checks. The mesh and the other databases stay. */
+static int bridge_close_db(int k)
 {
     char    name[256];
     int     p, missing = 0, g_missing = 0, complete, vof_files = 1;
     double  t0;
 
-    if(!g_open) return -1;
+    if(!g_open || k < 0 || k >= g_n_db || !g_db[k].open) return -1;
+
+    bridge_select(k);
 
     complete = (g_frames_written == g_n_frames);
 
     if(!complete && g_frames_written < 1)
-        of_msg("WARNING: no frame was written. There is no database; rerun with the recording window inside the simulated time.");
+        of_msg("WARNING: no frame was written to %sdata. There is no database; rerun with the recording window inside the simulated time.", g_dir);
 
     /* recurrence path */
     t0 = MPI_Wtime();
@@ -824,20 +1042,24 @@ static int bridge_close(void)
             FILE *f;
             int  i;
 
-            bridge_mkdir("data/rec");
+            snprintf(name, sizeof(name), "%sdata/rec", g_dir);
 
-            f = fopen("data/rec/jump_0_0_0", "w");
+            bridge_mkdir(name);
 
-            if(f == NULL) of_abort("cannot write 'data/rec/jump_0_0_0': %s", strerror(errno));
+            snprintf(name, sizeof(name), "%sdata/rec/jump_0_0_0", g_dir);
+
+            f = fopen(name, "w");
+
+            if(f == NULL) of_abort("cannot write '%s': %s", name, strerror(errno));
 
             for(i = 0; i < g_frames_written; i++) fprintf(f, "%d \n", (i + 1) % g_frames_written);
 
             fclose(f);
         }
 
-        of_msg("WARNING: only %d of %d frames were written (the run ended before the recording was complete). "
+        of_msg("WARNING: only %d of %d frames were written to %sdata (the run ended before the recording was complete). "
                "The database holds these %d frames with a replay path: set number_of_frames to %d in rCFD/rCFD_user_run.h to use it.",
-               g_frames_written, g_n_frames, g_frames_written, g_frames_written);
+               g_frames_written, g_n_frames, g_dir, g_frames_written, g_frames_written);
 
         g_n_frames = g_frames_written;
 
@@ -845,10 +1067,6 @@ static int bridge_close(void)
     }
 
     g_t_write += MPI_Wtime() - t0;
-
-    free(g_displ); free(g_norms); free(g_vof); free(g_vof_mem);
-
-    g_displ = NULL; g_norms = NULL; g_vof = NULL; g_vof_mem = NULL;
 
     vof_files = rcfd_is_vof_on(g_h);        /* a single phase without vof has no vof files */
 
@@ -863,26 +1081,30 @@ static int bridge_close(void)
 
         for(p = 0; p < g_n_phases; p++){
 
-            snprintf(name, sizeof(name), "data/c2c/c2c_0_%d_%d", p, of_rank);
+            snprintf(name, sizeof(name), "%sdata/c2c/c2c_0_%d_%d", g_dir, p, of_rank);
             if(!of_file_exists(name)) missing++;
 
-            snprintf(name, sizeof(name), "data/vof/vof_0_%d_%d", p, of_rank);
+            snprintf(name, sizeof(name), "%sdata/vof/vof_0_%d_%d", g_dir, p, of_rank);
             if(vof_files && !of_file_exists(name)) missing++;
         }
 
         if(of_rank == 0){
 
-            if(!of_file_exists("data/rec/jump_0_0_0"))     missing++;
-            if(!of_file_exists("data/rcfd_db.meta.toml"))  missing++;
+            snprintf(name, sizeof(name), "%sdata/rec/jump_0_0_0", g_dir);
+            if(!of_file_exists(name)) missing++;
+
+            snprintf(name, sizeof(name), "%sdata/rcfd_db.meta.toml", g_dir);
+            if(!of_file_exists(name)) missing++;
         }
 
         MPI_Allreduce(&missing, &g_missing, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 
-        if(g_missing > 0) of_abort("%d database files are missing after the preparation (all ranks)", g_missing);
+        if(g_missing > 0) of_abort("%d database files are missing in %sdata after the preparation (all ranks)", g_missing, g_dir);
 
         if(of_rank == 0){
 
-            printf("[rcfd_of] database written: %d frames;", g_n_frames);
+            if(k == 0) printf("[rcfd_of] database written: %d frames;", g_n_frames);
+            else       printf("[rcfd_of] database written in %sdata: %d frames of %g s;", g_dir, g_n_frames, g_frame_interval);
 
             for(p = 0; p < g_n_phases; p++) printf(" phase %d: %lld shifts (%lld from other ranks);", p, g_total_shifts[p], g_total_incoming[p]);
 
@@ -890,8 +1112,32 @@ static int bridge_close(void)
             fflush(stdout);
         }
 
-        of_msg("peak resident memory per rank: max %.0f MB, sum %.0f MB", of_peak_memory_mb(0), of_peak_memory_mb(1));
     }
+
+    bridge_store(k);
+
+    g_db[k].open = 0;
+    g_n_db_open--;
+
+    return complete ? 0 : 1;
+}
+
+static int bridge_close(void)
+{
+    int k, rc = 0;
+
+    if(!g_open) return -1;
+
+    for(k = 0; k < g_n_db; k++){
+
+        if(g_db[k].open && bridge_close_db(k) != 0) rc = 1;
+    }
+
+    free(g_displ); free(g_norms); free(g_vof); free(g_vof_mem);
+
+    g_displ = NULL; g_norms = NULL; g_vof = NULL; g_vof_mem = NULL;
+
+    of_msg("peak resident memory per rank: max %.0f MB, sum %.0f MB", of_peak_memory_mb(0), of_peak_memory_mb(1));
 
     of_free_topo(&of_topo);
 
@@ -903,7 +1149,7 @@ static int bridge_close(void)
 
     if(g_mpi_started_here){ MPI_Finalize(); g_mpi_started_here = 0; }
 
-    return complete ? 0 : 1;
+    return rc;
 }
 
 /* The calling program may trap floating point exceptions (OpenFOAM does with
@@ -920,13 +1166,30 @@ int rcfd_of_prep_open(const rcfd_of_mesh_t *mesh, const rcfd_of_prep_settings_t 
     return rc;
 }
 
-int rcfd_of_prep_frame_displ(const double *vof, const double *origin, const double *displ)
+int rcfd_of_prep_frame_db(int db, const double *vof, const double *origin, const double *displ)
 {
     fenv_t env;
     int    rc;
 
     feholdexcept(&env);
-    rc = bridge_frame(vof, origin, displ);
+    rc = bridge_frame(db, vof, origin, displ);
+    fesetenv(&env);
+
+    return rc;
+}
+
+int rcfd_of_prep_frame_displ(const double *vof, const double *origin, const double *displ)
+{
+    return rcfd_of_prep_frame_db(0, vof, origin, displ);
+}
+
+int rcfd_of_prep_close_db(int db)
+{
+    fenv_t env;
+    int    rc;
+
+    feholdexcept(&env);
+    rc = bridge_close_db(db);
     fesetenv(&env);
 
     return rc;

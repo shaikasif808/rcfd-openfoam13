@@ -17,6 +17,9 @@
 #                            /work/.../GF25_20kg_of13           22.5
 #                            /work/.../GF25_25kg_of13           27.5
 #                            /work/.../GF25_30kg_of13           31.0      <- last line: bed mass at the end of the batch
+# A database folder is any folder that holds data/: a case folder, or one of the folders db_10ms, db_25ms,
+# ... that a recording with extraFrameIntervals writes into its case folder (release r7). The script sets
+# _global_time_step and _number_of_frames in the header of each stage from the database of that stage.
 # The script makes stage_1, stage_2, ... there. A stage folder holds links to data/ and constant/ of its
 # database (nothing is written into the database folders), a copy of the header, and the results of the
 # stage. A finished stage is skipped when the job is submitted again; an unfinished stage folder stops the
@@ -77,6 +80,15 @@ while read -r db limit rest; do
         [ -d "$db/constant" ] && ln -s "$db/constant" "$s/constant"
         cp rCFD_user_run.h "$s/rCFD/rCFD_user_run.h"
         echo "$limit" > "$s/rCFD/stage_mass_limit.txt"
+
+        # frame interval and number of frames of this database into the header of the stage, so that
+        # databases with different frame intervals (db_10ms, db_25ms, ... of a recording) can be mixed
+        dt=$(awk -F= '/^frame_interval/{printf "%.10g", $2}' "$db/data/rcfd_foam_prep.txt")
+        nf=$(awk -F= '/^n_frames/{printf "%d", $2}' "$db/data/rcfd_foam_prep.txt")
+        [ -n "$dt" ] && [ -n "$nf" ] || stop "stage $k: cannot read frame interval and frames from $db/data/rcfd_foam_prep.txt"
+        sed -i "s|^#define _global_time_step .*|#define _global_time_step       $dt|; s|^#define _number_of_frames .*|#define _number_of_frames       $nf|" "$s/rCFD/rCFD_user_run.h"
+        grep -q "^#define _global_time_step       $dt\$" "$s/rCFD/rCFD_user_run.h" || stop "stage $k: the header has no line '#define _global_time_step'"
+        echo "stage $k: $nf frames of $dt s (from the database)"
 
         cd "$s" || stop "cannot enter $s"
 

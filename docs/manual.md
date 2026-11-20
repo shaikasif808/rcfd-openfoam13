@@ -166,6 +166,7 @@ The entry must not sit at the top level of `controlDict`; there it is ignored wi
 | `writeFields` | no | yes: writes `rCFDdisplacement.<phase>` at write times, the displacement over the last frame |
 | labelMaxCo | 1 | Courant number above which a solver time step is divided into sub-steps for the labels (from r3); 0.5 for rotating zones and solvers that run at large Courant numbers |
 | maxLabelSubCycles | 200 | largest number of label sub-steps per solver time step; the log says when it limits |
+| `extraFrameIntervals` | `()` | further frame intervals in s, each recorded into its own database `db_<ms>ms/data` in the same run (from r7), see below |
 
 ### Step 4: check `system/controlDict`
 
@@ -235,6 +236,29 @@ What to look at in the frame lines:
 | `rCFD_prep.trn`, `post/` | transcript and dump folder of the library |
 
 The database is complete as soon as the log says so; the CFD may continue or be stopped. A run that ends before the last frame leaves an unusable database and says so.
+
+### Several frame intervals in one recording (from r7)
+
+The frame interval decides how strongly the shifts mix (D_C2C is about h²/(4 Δt), section 1.5) and how many steps a run needs. To compare intervals without recording again, one CFD run can write several databases:
+
+```
+rCFDPrep1
+{
+    type            rCFDPrep;
+    libs            ("librCFDFunctionObjects.so");
+    phases          (air particles);
+    recordStart     10;
+    extraFrameIntervals (0.010 0.015 0.020 0.025);
+}
+```
+
+- `data/` is the database of the prep header, the same files as without the entry.
+- Every interval of the list gets its own position labels, transported with the same flux, and its own database in `db_10ms/data`, `db_15ms/data`, and so on (the name is the interval in milliseconds). It holds as many frames as fit into the recording time of `data/`: with 2000 frames of 5 ms these are 1000, 666, 500 and 400 frames.
+- A folder `db_..ms` is a database folder of its own, with its own `data/topo` and recurrence files. To use it, link or copy its `data/` into a case folder and set `global_time_step` and `number_of_frames` of the run header to its values (they are in `db_..ms/data/rcfd_foam_prep.txt`; the run program refuses a header that does not match). In `stages.txt` of a batch in stages name the folder `db_..ms` itself; the job script sets the two values.
+- Choose intervals that are multiples of the frame interval of the header. With `adjustTimeStep yes` the time step is cut at every frame time of every database; an interval that is not a multiple adds cuts, and the flow is then another realisation of the same case than without the entry. With a fixed time step every interval must be a multiple of the time step.
+- Cost: three label equations per phase and time step for every interval (on the small fluidised bed 2.5 s of CPU per interval and second of recording against 51 s for the flow, about 5 %), the search for the source cells for every frame of every database, and the disk space of the databases. At most 7 further intervals.
+
+The log names the database of every frame (`frame 12 of db_20ms/data`), reports each database when it is complete and says at the end that the simulation can be stopped. `py/rcfd_recurrence.py --case . db_10ms db_20ms` puts the databases of a recording side by side.
 
 ## 1.4 Run mode
 
@@ -1282,6 +1306,18 @@ Implicit step in the small lattice, frames of 20 ms, E at the outlet after 4 s: 
 Tested on two small fluidised-bed databases of one mesh (6180 cells): a run in three stages keeps bed mass, mean and spread across the switches; six switches back and forth without spray leave mean and spread unchanged to 0.000001 mm. Not tested: the GF25 databases of the cluster.
 
 How to run a batch in stages: `tutorial/GF25_fluidized/README.txt`. The model is explained in the note "Layering growth in rCFD: three moment fields instead of size bins" (https://claude.ai/artifact/HfDBYMrcsFfC54utS7C8UH).
+
+### Release r7
+
+| Change | File | Reason |
+| --- | --- | --- |
+| One recording can write several databases with different frame intervals: entry `extraFrameIntervals` of the function object, one set of position labels and one instance of the library per interval, databases in `db_<ms>ms/data`. Without the entry nothing changes. | `functionObject/rCFDPrep.H`, `functionObject/rCFDPrep.C`, `src/rcfd_of_bridge.h`, `src/rcfd_of_bridge.c`, `src/rcfd_of_images.h` | The frame interval decides the numerical mixing of the shifts; comparing intervals needed one CFD run per interval. |
+| The job script of the batch in stages sets `_global_time_step` and `_number_of_frames` of every stage from the database of that stage. | `tutorial/GF25_fluidized/run_gf25_batch.sbatch` | Stages may use databases with different frame intervals. |
+| Recurrence statistics of a database. | `py/rcfd_recurrence.py` | Section 1.5. |
+
+The library is unchanged: every database is written by its own instance, which gets its folder through `working_dir` of the file dictionary and its frame interval and number of frames through the solver dictionary, after the functions of the user header. The run program is unchanged.
+
+Tested on the small fluidised bed (6000 cells, 4 processes, 100 frames of 10 ms): the database in `data/` is file by file the same with and without further intervals and the same as recorded with r6; a 20 ms database written as a further interval is file by file the same as one written as the database of the header; `rcfd_run` and a batch in three stages run on the databases of 10, 20 and 30 ms of one recording. Periodic lattice tutorial with 20 ms in the header and 10 and 5 ms as further intervals: the outlet values of all three agree with the table of its README to the fourth digit. Not tested: a recording on the cluster, and more than three further intervals.
 
 ### What this means for existing work
 

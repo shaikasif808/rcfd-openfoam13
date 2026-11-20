@@ -86,7 +86,7 @@ static void bridge_remove_images_from_database(int n_frames, int n_phases, int v
         long long size;
         unsigned char *buf, *q, *end;
 
-        snprintf(name, sizeof(name), "data/c2c/c2c_0_%d_%d", p, of_rank);
+        snprintf(name, sizeof(name), "%sdata/c2c/c2c_0_%d_%d", g_dir, p, of_rank);
 
         size = of_file_size(name);
 
@@ -243,7 +243,7 @@ static void bridge_remove_images_from_database(int n_frames, int n_phases, int v
             int  n_all, k;
             char line[128];
 
-            snprintf(name, sizeof(name), "data/vof/vof_0_%d_%d", p, of_rank);
+            snprintf(name, sizeof(name), "%sdata/vof/vof_0_%d_%d", g_dir, p, of_rank);
             snprintf(tmp, sizeof(tmp), "%s.tmp", name);
 
             fi = fopen(name, "r"); fo = fopen(tmp, "w");
