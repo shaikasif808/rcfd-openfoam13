@@ -2,6 +2,19 @@
 
 Newest first. One entry per piece of work: date, topic, files, what changed, tested / not tested.
 
+## 2026-11-20  Recurrence statistics of a database (granulation chat)
+
+- `py/rcfd_recurrence.py` (new): reads `data/` and writes `recurrence/` in the case folder:
+  recurrence matrix and distance against time lag, seam of the replay loop, random-cell series with
+  autocorrelation and spectrum, bed height and phase per chamber, plane maps, displacement per frame
+  and numerical diffusivity D_C2C of the shifts. No change to `lib/`, `src/` or the run.
+- `docs/manual.md` 1.5: section "Recurrence statistics of a database", figure 14.
+- Tested: small fluidised bed (40 and 400 frames, 4 ranks), GF25 mesh with a two-frame database.
+  Not tested: a full GF25 database (2000 frames, 32 ranks) and meshes with periodic sides (the
+  displacement across a periodic side is counted as a long one).
+- Planned next, not started: several frame intervals in one recording (`rCFDPrep`,
+  `src/rcfd_of_bridge.c`) and the second propagator moment for a local diffusivity.
+
 ## 2026-11-19  Release r6: runs in stages on several databases (granulation chat)
 
 - `src/rcfd_run_main.c`: option `-init <folder>` (start from `out/state_final.bin` of another run on

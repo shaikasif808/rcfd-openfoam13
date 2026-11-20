@@ -395,6 +395,35 @@ The example header writes one line per step to `rCFD_mean_height_monitor.out`: t
 gnuplot -p -e "plot 'rCFD_mean_height_monitor.out' u 1:2 w l t 'class 0', '' u 1:3 w l t 'class 1'"
 ```
 
+### Recurrence statistics of a database
+
+`py/rcfd_recurrence.py` answers three questions about a recorded database without running anything: is the flow recurrent, is the database long enough, and how strongly do its shifts mix. It reads `data/` only and writes a folder `recurrence/` into the case folder.
+
+```bash
+python3 $RCFD_FOAM_HOME/py/rcfd_recurrence.py --plane x=0 z=0.375          # in the case folder
+python3 $RCFD_FOAM_HOME/py/rcfd_recurrence.py --case A B C                 # several databases, table at the end
+```
+
+| File | Content |
+| --- | --- |
+| `summary.txt` | all numbers with a line of explanation |
+| `recurrence_matrix.png`, `recurrence_lag.csv` | the library's recurrence matrix `data/rec/matrix_0_0_0` and the mean distance against time lag; the same from 200 random bed cells and from the planes |
+| `cells.png`, `cells.csv` | volume fraction at the random cells: series, autocorrelation, spectrum |
+| `bed.png`, `bed.csv` | bed height and phase volume per chamber over the database |
+| `planes.png` | time mean and standard deviation of the volume fraction on the planes |
+| `shifts.png`, `shifts.csv` | displacement per frame in cell widths and the numerical diffusivity of the shifts, per phase |
+
+![Figure 14](figures/fig14_recurrence_matrix.png)
+
+*Figure 14. Recurrence matrix and distance against time lag of a 4 s database of the small fluidised bed.*
+
+How to read the numbers:
+
+- **Decorrelation** is the time lag at which two frames are as different as frames far apart (90 % of the plateau). **Return** is the deepest minimum of the distance after that, the dominant period if the flow has one. A database should hold many decorrelation times and several return times.
+- **Partner** is, for every frame, the most similar frame outside its own neighbourhood, in units of the distance between two successive frames. Near 1 the database holds states as close as successive frames; large values mean a jump of the recurrence path is a visible break. **Seam** is the same measure for the jump from the last frame to the first, which replay makes once per pass; the smoothest loop that the database offers is listed with it.
+- **Halves** compares the time mean of the first and the second half of the database with the size of the fluctuations. Below about 0.1 the mean field is converged; chamber shares with a trend say the same for slow sloshing.
+- **D_C2C** is the numerical diffusivity of the shift: the variance of the source positions of a cell divided by twice the frame interval (`prep_set_artificial_diffusivity` of the library; Lumetzberger, Pirker and Lichtenegger, Chem. Eng. Sci. 311 (2025) 121624, eq. 39). It is close to h²/(4 Δt) for cell width h and frame interval Δt, so it falls in proportion to the frame interval. Compare it with the dispersion the real flow has; where D_C2C is the larger one, the run over-mixes and only a longer frame interval helps.
+
 ## 1.6 Worked example: the fluidisedBed tutorial
 
 `tutorials/multiphaseEuler/fluidisedBed` runs end to end with one script: 2 s spin-up, 80 frames of 0.025 s, then 800 rCFD steps (20 s) on 4 processors.

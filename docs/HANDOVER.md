@@ -17,7 +17,7 @@ ANSYS Fluent. This repository couples the unchanged library (`lib/`) to OpenFOAM
 | `src/` | coupling: `rcfd_of_bridge.c` (library side of the function object), `rcfd_run_main.c` (the run program), `rcfd_of_common.h`, `rcfd_of_images.h` (periodic sides) |
 | `user/` | `udf.h` (what a user header may call, Fluent names kept), `rcfd_user_wrap.c` |
 | `bin/rcfd_compile` | builds the two user headers of a case: `rCFD/rCFD_user_prep.h` (recording) and `rCFD/rCFD_user_run.h` (run) |
-| `py/` | post-processing: `snap_to_foam.py`, `rcfd_slices.py`, `rcfd_monitor.py`, `rcfd_granulation_plot.py`, `of_reader.py` |
+| `py/` | post-processing: `snap_to_foam.py`, `rcfd_slices.py`, `rcfd_monitor.py`, `rcfd_granulation_plot.py`, `rcfd_recurrence.py`, `of_reader.py` |
 | `tutorial/` | `fluidisedBed`, `aeratedStirredTank`, `latticeReactions`, `fischerK_of13` (16 million cells), `GF25_fluidized` (granulator, incl. batch granulation in stages) |
 | `docs/` | `manual.md` with figures, this note, `CHANGES.md` |
 
