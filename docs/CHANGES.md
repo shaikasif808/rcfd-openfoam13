@@ -2,6 +2,18 @@
 
 Newest first. One entry per piece of work: date, topic, files, what changed, tested / not tested.
 
+## 2026-11-23  Several granulation runs in one picture (granulation chat)
+
+- `py/rcfd_granulation_compare.py` (new): overlays runs or batches in stages (size, span, variance,
+  difference between the chambers) and plots variance added per minute and run time per process
+  minute against the frame interval; table as CSV. For the study of the frame interval on the GF25
+  batch. Reads the run folders only.
+- Tested: four runs on the 10, 20, 25 and 30 ms databases of one small fluidised-bed recording, and
+  a single run against a batch in three stages. Not tested: GF25 runs.
+- GF25 15 kg recording with `extraFrameIntervals (0.010 0.015 0.020 0.025)` done on the cluster
+  (r7): D_C2C of the solid 4.0e-3, 3.1e-3, 2.5e-3, 2.0e-3, 1.7e-3 m2/s at 5 to 25 ms. The solid
+  moves less than one cell per frame (0.17 to 0.87 h), so D_C2C falls more slowly than 1/interval.
+
 ## 2026-11-20  Release r7: several frame intervals in one recording (granulation chat)
 
 - `functionObject/rCFDPrep.H/.C`: entry `extraFrameIntervals`; one label set per interval
